@@ -4,35 +4,35 @@ Description: |
   CloudFormation template for a single-master Kubernetes cluster.
 
 Parameters:
-  ClusterName:
-    Type: String
-    Default: MyKubernetesCluster
-    Description: Name of the Kubernetes cluster
   VpcId:
     Type: AWS::EC2::VPC::Id
   SubnetIDs:
     Type: List<AWS::EC2::Subnet::Id>
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+  KubernetesToken:
+    Type: String
 
 Resources:
   # Load Balancer
   LoadBalancerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties: 
-      GroupName: !Join [ "-", [ !Ref ClusterName, "lb" ] ]
+      GroupName: !Join [ "-", [ !Ref AWS::StackName, "lb" ] ]
       GroupDescription: Kubernetes Load Balancer Security Group
       Tags:
         - Key: Name
-          Value: !Join [ " ", [ "Kubernetes", !Ref ClusterName, "Load Balancer" ] ]
+          Value: !Join [ " ", [ "Kubernetes", !Ref AWS::StackName, "Load Balancer" ] ]
       VpcId: !Ref VpcId
 
   # Load Balancer: Master
   MasterAPITargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: !Join [ "-", [ !Ref ClusterName, "master" ] ]
+      Name: !Join [ "-", [ !Ref AWS::StackName, "master" ] ]
       Tags:
         - Key: Name
-          Value: !Join [ " ", [ !Ref ClusterName, "master" ] ]
+          Value: !Join [ " ", [ !Ref AWS::StackName, "master" ] ]
       VpcId: !Ref VpcId
       Port: 6443
       Protocol: TCP
@@ -43,14 +43,7 @@ Resources:
     Properties: 
       FileSystemTags:
         - Key: Name
-          Value: !Ref ClusterName
-  MasterFileSystemMountTarget:
-    Type: AWS::EFS::MountTarget
-    Properties: 
-      FileSystemId: !Ref MasterFileSystem
-      SubnetId: !Ref SubnetIDs
-      SecurityGroups: 
-        - !Ref MasterSecurityGroup
+          Value: !Ref AWS::StackName
 
   # Master: Autoscaling Group
   MasterLaunchConfigurtion:
@@ -60,6 +53,7 @@ Resources:
         - !Ref MasterSecurityGroup
       ImageId: ami-46c1b650
       InstanceType: t2.small
+      KeyName: !Ref KeyName
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs: 
@@ -76,7 +70,7 @@ Resources:
       MaxSize: "0"
       Tags:
         - Key: Name
-          Value: !Join [ " ", [ !Ref ClusterName, "master" ] ]
+          Value: !Join [ " ", [ !Ref AWS::StackName, "master" ] ]
           PropagateAtLaunch: true
       TargetGroupARNs:
         - !Ref MasterAPITargetGroup
@@ -85,11 +79,11 @@ Resources:
   MasterSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties: 
-      GroupName: !Join [ "-", [ !Ref ClusterName, "master" ] ]
+      GroupName: !Join [ "-", [ !Ref AWS::StackName, "master" ] ]
       GroupDescription: Kubernetes Master Security Group
       Tags:
         - Key: Name
-          Value: !Join [ " ", [ !Ref ClusterName, "Master" ] ]
+          Value: !Join [ " ", [ !Ref AWS::StackName, "Master" ] ]
       VpcId: !Ref VpcId
   MasterSecurityGroupIngressRule:
     Type: AWS::EC2::SecurityGroupIngress
