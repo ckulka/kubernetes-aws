@@ -1,0 +1,121 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: |
+  CloudFormation template for a single-master Kubernetes cluster.
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: MyKubernetesCluster
+    Description: Name of the Kubernetes cluster
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetIDs:
+    Type: List<AWS::EC2::Subnet::Id>
+
+Resources:
+  # Load Balancer
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupName: !Join [ "-", [ !Ref ClusterName, "lb" ] ]
+      GroupDescription: Kubernetes Load Balancer Security Group
+      Tags:
+        - Key: Name
+          Value: !Join [ " ", [ "Kubernetes", !Ref ClusterName, "Load Balancer" ] ]
+      VpcId: !Ref VpcId
+
+  # Load Balancer: Master
+  MasterAPITargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Join [ "-", [ !Ref ClusterName, "master" ] ]
+      Tags:
+        - Key: Name
+          Value: !Join [ " ", [ !Ref ClusterName, "master" ] ]
+      VpcId: !Ref VpcId
+      Port: 6443
+      Protocol: TCP
+
+  # Master: File System
+  MasterFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties: 
+      FileSystemTags:
+        - Key: Name
+          Value: !Ref ClusterName
+  MasterFileSystemMountTarget:
+    Type: AWS::EFS::MountTarget
+    Properties: 
+      FileSystemId: !Ref MasterFileSystem
+      SubnetId: !Ref SubnetIDs
+      SecurityGroups: 
+        - !Ref MasterSecurityGroup
+
+  # Master: Autoscaling Group
+  MasterLaunchConfigurtion:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      SecurityGroups: 
+        - !Ref MasterSecurityGroup
+      ImageId: ami-46c1b650
+      InstanceType: t2.small
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs: 
+            VolumeType: gp2
+            SnapshotId: snap-0c136bf135a86351f
+            DeleteOnTermination: true
+            VolumeSize: 25
+  MasterAutoscalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchConfigurationName: !Ref MasterLaunchConfigurtion
+      VPCZoneIdentifier: !Ref SubnetIDs
+      MinSize: "0"
+      MaxSize: "0"
+      Tags:
+        - Key: Name
+          Value: !Join [ " ", [ !Ref ClusterName, "master" ] ]
+          PropagateAtLaunch: true
+      TargetGroupARNs:
+        - !Ref MasterAPITargetGroup
+
+  # Master: Security Group
+  MasterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupName: !Join [ "-", [ !Ref ClusterName, "master" ] ]
+      GroupDescription: Kubernetes Master Security Group
+      Tags:
+        - Key: Name
+          Value: !Join [ " ", [ !Ref ClusterName, "Master" ] ]
+      VpcId: !Ref VpcId
+  MasterSecurityGroupIngressRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref MasterSecurityGroup
+      SourceSecurityGroupId: !Ref MasterSecurityGroup
+      IpProtocol: "-1"
+  MasterSecurityGroupEgressRule:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref MasterSecurityGroup
+      DestinationSecurityGroupId: !Ref MasterSecurityGroup
+      IpProtocol: "-1"
+  MasterSecurityGroupLBIngressRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref MasterSecurityGroup
+      SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 6443
+      ToPort: 6443
+  MasterSecurityGroupLBEgressRule:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref MasterSecurityGroup
+      DestinationSecurityGroupId: !Ref LoadBalancerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 6443
+      ToPort: 6443
