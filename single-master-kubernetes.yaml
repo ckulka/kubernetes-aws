@@ -10,6 +10,13 @@ Parameters:
   KeyName:
     Type: AWS::EC2::KeyPair::KeyName
     Description: SSH Key for the EC2 instances
+  LoadBalancerScheme:
+    Type: String
+    Default: internet-facing
+    Description: Specifies whether the load balancer is internal or Internet-facing.
+    AllowedValues:
+      - internet-facing
+      - internal
   KubernetesToken:
     Type: String
     Default: "123456.1234567890123456"
@@ -43,6 +50,7 @@ Metadata:
           - VpcId
           - SubnetIds
           - KeyName
+          - LoadBalancerScheme
       - Label:
           default: Kubernetes Configuration
         Parameters:
@@ -54,17 +62,24 @@ Metadata:
 
 Resources:
   # Load Balancer
-  LoadBalancerSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties: 
-      GroupName: !Join [ "-", [ !Ref "AWS::StackName", "lb" ] ]
-      GroupDescription: Kubernetes Load Balancer Security Group
-      Tags:
-        - Key: Name
-          Value: !Join [ "-", [ !Ref "AWS::StackName", "lb" ] ]
-      VpcId: !Ref VpcId
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Ref "AWS::StackName"
+      Type: network
+      Scheme: !Ref LoadBalancerScheme
+      Subnets: !Ref SubnetIds
 
   # Load Balancer: Master
+  MasterAPIListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 6443
+      Protocol: TCP
+      DefaultActions: 
+        - Type: forward
+          TargetGroupArn: !Ref MasterAPITargetGroup
   MasterAPITargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
@@ -72,22 +87,6 @@ Resources:
       VpcId: !Ref VpcId
       Port: 6443
       Protocol: TCP
-  LoadBalancerSecurityGroupLBIngressRule:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      GroupId: !Ref LoadBalancerSecurityGroup
-      CidrIp: "0.0.0.0/0"
-      IpProtocol: tcp
-      FromPort: 6443
-      ToPort: 6443
-  LoadBalancerSecurityGroupLBEgressRule:
-    Type: AWS::EC2::SecurityGroupEgress
-    Properties:
-      GroupId: !Ref LoadBalancerSecurityGroup
-      DestinationSecurityGroupId: !Ref MasterSecurityGroup
-      IpProtocol: tcp
-      FromPort: 6443
-      ToPort: 6443
 
   # Master: File System
   MasterFileSystem:
@@ -164,7 +163,7 @@ Resources:
               "--kubernetes-version v$K8S_VERSION",
               "--skip-token-print",
               "--node-name master",
-              # TODO "--apiserver-cert-extra-sans", !Ref LoadBalancer,
+              "--apiserver-cert-extra-sans", !GetAtt LoadBalancer.DNSName,
               "--pod-network-cidr", !Ref PodNetworkCIDR,
               "--token", !Ref KubernetesToken ] ],
             "KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/v$K8S_FLANNEL/Documentation/kube-flannel.yml",
@@ -200,17 +199,18 @@ Resources:
       Tags:
         - Key: Name
           Value: !Join [ "-", [ !Ref "AWS::StackName", "master" ] ]
-  MasterSecurityGroupIngressRule:
+      SecurityGroupIngress:
+        - CidrIp: "0.0.0.0/0"
+          IpProtocol: tcp
+          FromPort: 6443
+          ToPort: 6443
+        - CidrIp: "0.0.0.0/0"
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+  MasterSecurityGroupIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !Ref MasterSecurityGroup
       SourceSecurityGroupId: !Ref MasterSecurityGroup
       IpProtocol: "-1"
-  MasterSecurityGroupLBIngressRule:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      GroupId: !Ref MasterSecurityGroup
-      SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
-      IpProtocol: tcp
-      FromPort: 6443
-      ToPort: 6443
