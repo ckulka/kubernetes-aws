@@ -2,6 +2,13 @@ AWSTemplateFormatVersion: 2010-09-09
 
 Description: CloudFormation template for a single-master Kubernetes cluster.
 
+Outputs:
+  DNSName:
+    Description: The URL for the cluster.
+    Value: !GetAtt LoadBalancer.DNSName
+    Export:
+      Name: !Sub "${AWS::StackName}-Endpoint"
+
 Parameters:
   VpcId:
     Type: AWS::EC2::VPC::Id
@@ -65,14 +72,14 @@ Resources:
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
-      Name: !Ref "AWS::StackName"
+      Name: !Ref AWS::StackName
       Type: network
       Scheme: !Ref LoadBalancerScheme
       Subnets: !Ref SubnetIds
 
   # Load Balancer: Master
   MasterAPIListener:
-    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
       LoadBalancerArn: !Ref LoadBalancer
       Port: 6443
@@ -83,7 +90,7 @@ Resources:
   MasterAPITargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: !Join [ "-", [ !Ref "AWS::StackName", "master" ] ]
+      Name: !Sub ${AWS::StackName}-master
       VpcId: !Ref VpcId
       Port: 6443
       Protocol: TCP
@@ -94,7 +101,7 @@ Resources:
     Properties: 
       FileSystemTags:
         - Key: Name
-          Value: !Join [ "-", [ !Ref "AWS::StackName", "master" ] ]
+          Value: !Sub ${AWS::StackName}-master
 
   # Master: Autoscaling Group
   MasterLaunchConfigurtion:
@@ -176,7 +183,7 @@ Resources:
       MaxSize: "1"
       Tags:
         - Key: Name
-          Value: !Join [ "-", [ !Ref "AWS::StackName", "master" ] ]
+          Value: !Sub ${AWS::StackName}-master
           PropagateAtLaunch: true
       TargetGroupARNs:
         - !Ref MasterAPITargetGroup
@@ -185,12 +192,12 @@ Resources:
   MasterSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties: 
-      GroupName: !Join [ "-", [ !Ref "AWS::StackName", "master" ] ]
+      GroupName: !Sub ${AWS::StackName}-master
       GroupDescription: Kubernetes Master Security Group
       VpcId: !Ref VpcId
       Tags:
         - Key: Name
-          Value: !Join [ "-", [ !Ref "AWS::StackName", "master" ] ]
+          Value: !Sub ${AWS::StackName}-master
       SecurityGroupIngress:
         - CidrIp: "0.0.0.0/0"
           IpProtocol: tcp
