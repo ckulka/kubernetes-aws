@@ -12,8 +12,10 @@ Outputs:
 Parameters:
   VpcId:
     Type: AWS::EC2::VPC::Id
-  SubnetIds:
-    Type: List<AWS::EC2::Subnet::Id>
+  SubnetId1:
+    Type: AWS::EC2::Subnet::Id
+  SubnetId2:
+    Type: AWS::EC2::Subnet::Id
   KeyName:
     Type: AWS::EC2::KeyPair::KeyName
     Description: SSH Key for the EC2 instances
@@ -55,7 +57,8 @@ Metadata:
           default: AWS Placement
         Parameters:
           - VpcId
-          - SubnetIds
+          - SubnetId1
+          - SubnetId2
           - KeyName
           - LoadBalancerScheme
       - Label:
@@ -75,7 +78,9 @@ Resources:
       Name: !Ref AWS::StackName
       Type: network
       Scheme: !Ref LoadBalancerScheme
-      Subnets: !Ref SubnetIds
+      Subnets: 
+        - !Ref SubnetId1
+#        - !Ref SubnetId1 TODO
 
   # Load Balancer: Master
   MasterAPIListener:
@@ -93,6 +98,40 @@ Resources:
       Name: !Sub ${AWS::StackName}-master
       VpcId: !Ref VpcId
       Port: 6443
+      Protocol: TCP
+    
+  # Load Balancer: Node
+  NodeHTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: TCP
+      DefaultActions: 
+        - Type: forward
+          TargetGroupArn: !Ref NodeHTTPTargetGroup
+  NodeHTTPTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${AWS::StackName}-http
+      VpcId: !Ref VpcId
+      Port: 80
+      Protocol: TCP
+  NodeHTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: TCP
+      DefaultActions: 
+        - Type: forward
+          TargetGroupArn: !Ref NodeHTTPSTargetGroup
+  NodeHTTPSTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${AWS::StackName}-https
+      VpcId: !Ref VpcId
+      Port: 443
       Protocol: TCP
 
   # Master: File System
@@ -161,12 +200,13 @@ Resources:
             # See https://kubernetes.io/docs/setup/independent/create-cluster-kubeadm/
             if [ ! -f /etc/kubernetes/admin.conf ]; then
               echo Initialising Kubernetes
-              kubeadm init --kubernetes-version v$K8S_VERSION       \
-                --skip-token-print                                  \
-                --node-name master                                  \
-                --apiserver-cert-extra-sans ${LoadBalancer.DNSName} \
-                --pod-network-cidr ${PodNetworkCIDR}                \
-                --token ${KubernetesToken}                          \
+              kubeadm init                                            \
+                --kubernetes-version v${KubernetesVersion}            \
+                --node-name master                                    \
+                --apiserver-cert-extra-sans ${LoadBalancer.DNSName}   \
+                --pod-network-cidr ${PodNetworkCIDR}                  \
+                --token ${KubernetesToken}                            \
+                --skip-token-print
               KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/v${FlannelVersion}/Documentation/kube-flannel.yml
               echo Initialised Kubernetes
             else
@@ -177,7 +217,9 @@ Resources:
     DependsOn: MasterFileSystem
     Properties:
       LaunchConfigurationName: !Ref MasterLaunchConfigurtion
-      VPCZoneIdentifier: !Ref SubnetIds
+      VPCZoneIdentifier: 
+        - !Ref SubnetId1
+#        - !Ref SubnetId2 TODO
       MinSize: "0"
       DesiredCapacity: "1"
       MaxSize: "1"
@@ -211,5 +253,108 @@ Resources:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !Ref MasterSecurityGroup
+      SourceSecurityGroupId: !Ref MasterSecurityGroup
+      IpProtocol: "-1"
+
+  # Node: Autoscaling Group
+  NodeLaunchConfigurtion:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      SecurityGroups: 
+        - !Ref NodeSecurityGroup
+      ImageId: ami-46c1b650
+      InstanceType: t2.small
+      KeyName: !Ref KeyName
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs: 
+            VolumeType: gp2
+            SnapshotId: snap-0c136bf135a86351f
+            DeleteOnTermination: true
+            VolumeSize: 25
+      UserData:
+        Fn::Base64: 
+          !Sub |
+            #!/bin/bash
+            # See https://docs.docker.com/engine/installation/linux/docker-ce/centos/#install-docker-ce
+            echo Installing Docker
+            yum install -y yum-utils device-mapper-persistent-data lvm2
+            yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+            yum install -y docker-${DockerVersion}
+            systemctl enable docker.service && systemctl start docker.service
+            echo Installed Docker
+
+            # See https://kubernetes.io/docs/setup/independent/install-kubeadm/
+            echo Installing Kubernetes
+            cat <<EOF > /etc/yum.repos.d/kubernetes.repo
+            [kubernetes]
+            name=Kubernetes
+            baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+            enabled=1
+            gpgcheck=1
+            repo_gpgcheck=1
+            gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg
+                    https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+            EOF
+            setenforce 0
+            yum install -y kubelet-${KubernetesVersion} kubeadm-${KubernetesVersion} kubectl-${KubernetesVersion}
+            systemctl enable kubelet && systemctl start kubelet
+            echo Installed Kubernetes
+            
+            # See https://kubernetes.io/docs/admin/kubeadm/#kubeadm-join
+            echo Joining the cluster
+            kubeadm join --token ${KubernetesToken} --discovery-token-unsafe-skip-ca-verification ${LoadBalancer.DNSName}:6443
+            echo Joined the cluster
+  NodeAutoscalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchConfigurationName: !Ref NodeLaunchConfigurtion
+      VPCZoneIdentifier: 
+        - !Ref SubnetId1
+#        - !Ref SubnetId2 TODO
+      MinSize: "0"
+      DesiredCapacity: "0"
+      MaxSize: "4"
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-node
+          PropagateAtLaunch: true
+      TargetGroupARNs:
+        - !Ref NodeHTTPTargetGroup
+        - !Ref NodeHTTPSTargetGroup
+
+  # Node: Security Group
+  NodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupName: !Sub ${AWS::StackName}-node
+      GroupDescription: Kubernetes Node Security Group
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-node
+      SecurityGroupIngress:
+        - CidrIp: "0.0.0.0/0"
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+        - CidrIp: "0.0.0.0/0"
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+        - CidrIp: "0.0.0.0/0"
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+  NodeSecurityGroupNodeIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NodeSecurityGroup
+      SourceSecurityGroupId: !Ref NodeSecurityGroup
+      IpProtocol: "-1"
+  NodeSecurityGroupMasterIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NodeSecurityGroup
       SourceSecurityGroupId: !Ref MasterSecurityGroup
       IpProtocol: "-1"
