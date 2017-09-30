@@ -1,0 +1,10 @@
+Resources:
+
+  # Master: File System
+  MasterFileSystemMountTarget:
+    Type: AWS::EFS::MountTarget
+    Properties: 
+      FileSystemId: !Ref MasterFileSystem
+      SubnetId: !Ref SubnetIDs
+      SecurityGroups: 
+        - !Ref MasterSecurityGroup

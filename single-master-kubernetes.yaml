@@ -80,7 +80,7 @@ Resources:
       Scheme: !Ref LoadBalancerScheme
       Subnets: 
         - !Ref SubnetId1
-#        - !Ref SubnetId1 TODO
+#        - !Ref SubnetId2 TODO
 
   # Load Balancer: Master
   MasterAPIListener:
@@ -141,6 +141,20 @@ Resources:
       FileSystemTags:
         - Key: Name
           Value: !Sub ${AWS::StackName}-master
+  MasterSubnetId1MountTarget:
+    Type: AWS::EFS::MountTarget
+    Properties: 
+      FileSystemId: !Ref MasterFileSystem
+      SubnetId: !Ref SubnetId1
+      SecurityGroups: 
+        - !Ref MasterSecurityGroup
+  MasterSubnetId2MountTarget:
+    Type: AWS::EFS::MountTarget
+    Properties: 
+      FileSystemId: !Ref MasterFileSystem
+      SubnetId: !Ref SubnetId2
+      SecurityGroups: 
+        - !Ref MasterSecurityGroup
 
   # Master: Autoscaling Group
   MasterLaunchConfigurtion:
@@ -194,7 +208,10 @@ Resources:
             EOF
             setenforce 0
             yum install -y kubelet-${KubernetesVersion} kubeadm-${KubernetesVersion} kubectl-${KubernetesVersion}
-            systemctl enable kubelet && systemctl start kubelet
+            sed -i 's/systemd/cgroupfs/' /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+            systemctl daemon-reload
+            systemctl enable kubelet
+            systemctl start kubelet
             echo Installed Kubernetes
             
             # See https://kubernetes.io/docs/setup/independent/create-cluster-kubeadm/
@@ -202,11 +219,10 @@ Resources:
               echo Initialising Kubernetes
               kubeadm init                                            \
                 --kubernetes-version v${KubernetesVersion}            \
-                --node-name master                                    \
+                --cloud-provider=aws                                  \
                 --apiserver-cert-extra-sans ${LoadBalancer.DNSName}   \
                 --pod-network-cidr ${PodNetworkCIDR}                  \
-                --token ${KubernetesToken}                            \
-                --skip-token-print
+                --token ${KubernetesToken}
               KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/v${FlannelVersion}/Documentation/kube-flannel.yml
               echo Initialised Kubernetes
             else
@@ -298,7 +314,9 @@ Resources:
             EOF
             setenforce 0
             yum install -y kubelet-${KubernetesVersion} kubeadm-${KubernetesVersion} kubectl-${KubernetesVersion}
-            systemctl enable kubelet && systemctl start kubelet
+            systemctl daemon-reload
+            systemctl enable kubelet
+            systemctl start kubelet
             echo Installed Kubernetes
             
             # See https://kubernetes.io/docs/admin/kubeadm/#kubeadm-join
