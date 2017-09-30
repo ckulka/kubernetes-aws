@@ -1,12 +1,11 @@
 AWSTemplateFormatVersion: 2010-09-09
 
-Description: |
-  CloudFormation template for a single-master Kubernetes cluster.
+Description: CloudFormation template for a single-master Kubernetes cluster.
 
 Parameters:
   VpcId:
     Type: AWS::EC2::VPC::Id
-  SubnetIDs:
+  SubnetIds:
     Type: List<AWS::EC2::Subnet::Id>
   KeyName:
     Type: AWS::EC2::KeyPair::KeyName
@@ -19,7 +18,7 @@ Parameters:
   PodNetworkCIDR:
     Type: String
     Default: "10.244.0.0/16"
-    Description: CIDR of the Pod Network used by Flannel
+    Description: CIDR of the overlay network (Flannel), should not conflict with an existing subnet.
   DockerVersion:
     Type: String
     Default: "1.12.6"
@@ -34,6 +33,24 @@ Parameters:
     Type: String
     Default: "0.9.0"
     Description: Version of Flannel to use, see https://github.com/coreos/flannel/releases
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: 
+          default: AWS Placement
+        Parameters:
+          - VpcId
+          - SubnetIds
+          - KeyName
+      - Label:
+          default: Kubernetes Configuration
+        Parameters:
+          - KubernetesToken
+          - PodNetworkCIDR
+          - KubernetesVersion
+          - DockerVersion
+          - FlannelVersion
 
 Resources:
   # Load Balancer
@@ -162,7 +179,7 @@ Resources:
     DependsOn: MasterFileSystem
     Properties:
       LaunchConfigurationName: !Ref MasterLaunchConfigurtion
-      VPCZoneIdentifier: !Ref SubnetIDs
+      VPCZoneIdentifier: !Ref SubnetIds
       MinSize: "0"
       DesiredCapacity: "1"
       MaxSize: "1"
