@@ -29,12 +29,17 @@ Parameters:
   KubernetesToken:
     Type: String
     Default: "123456.1234567890123456"
-    AllowedPattern: ^[a-z0-9]{6}\.[a-z0-9]{16}$
     Description: Token to join this Kubernetes cluster
+    AllowedPattern: ^[a-z0-9]{6}\.[a-z0-9]{16}$
+    MinLength: 23
+    MaxLength: 23
+    NoEcho: true
   PodNetworkCIDR:
     Type: String
     Default: "10.244.0.0/16"
     Description: CIDR of the overlay network (Flannel), should not conflict with an existing subnet.
+    MinLength: 10
+    MaxLength: 19
   DockerVersion:
     Type: String
     Default: "1.12.6"
@@ -49,6 +54,26 @@ Parameters:
     Type: String
     Default: "0.9.0"
     Description: Version of Flannel to use, see https://github.com/coreos/flannel/releases
+  MasterInstanceType:
+    Type: String
+    Default: t2.small
+    Description: Instance type for the Master node. Default is t2.small.
+    AllowedValues:
+      - t2.micro
+      - t2.small
+      - t2.medium
+  NodeInstanceType:
+    Type: String
+    Default: t2.small
+    Description: Instance type for the nodes. Default is t2.small.
+    AllowedValues:
+      - t2.micro
+      - t2.small
+      - t2.medium
+  ImageId:
+    Type: AWS::EC2::Image::Id
+    Default: ami-46c1b650
+    Description: AMI to use for the EC2 instances
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -59,7 +84,6 @@ Metadata:
           - VpcId
           - SubnetId1
           - SubnetId2
-          - KeyName
           - LoadBalancerScheme
       - Label:
           default: Kubernetes Configuration
@@ -69,6 +93,28 @@ Metadata:
           - KubernetesVersion
           - DockerVersion
           - FlannelVersion
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - KeyName
+          - MasterInstanceType
+          - NodeInstanceType
+          - ImageId
+    ParameterLabels:
+      MasterInstanceType: 
+        default: Instance Type (Master)
+      NodeInstanceType: 
+        default: Instance Type (Node)
+      ImageId:
+        default: Amazon Machine Image
+      VpcId:
+        default: VPC ID
+      KubernetesVersion:
+        default: Kubernetes Version
+      DockerVersion:
+        default: Docker Version
+      FlannelVersion:
+        default: Flannel Version
 
 Resources:
   # Load Balancer
@@ -162,8 +208,8 @@ Resources:
     Properties:
       SecurityGroups: 
         - !Ref MasterSecurityGroup
-      ImageId: ami-46c1b650
-      InstanceType: t2.small
+      ImageId: !Ref ImageId
+      InstanceType: !Ref MasterInstanceType
       KeyName: !Ref KeyName
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
@@ -278,8 +324,8 @@ Resources:
     Properties:
       SecurityGroups: 
         - !Ref NodeSecurityGroup
-      ImageId: ami-46c1b650
-      InstanceType: t2.small
+      ImageId: !Ref ImageId
+      InstanceType: !Ref NodeInstanceType
       KeyName: !Ref KeyName
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
