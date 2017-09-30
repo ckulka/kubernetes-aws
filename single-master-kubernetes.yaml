@@ -114,65 +114,57 @@ Resources:
             VolumeSize: 25
       UserData:
         Fn::Base64: 
-          !Join [ "\n", [
-            "#!/bin/bash",
-            "DOCKER_VERSION=1.12.6",
-            "K8S_VERSION=1.8.0",
-            "K8S_FLANNEL=0.9.0",
-
+          !Sub |
+            #!/bin/bash
             # See http://docs.aws.amazon.com/efs/latest/ug/wt1-test.html
-            "echo Mounting EFS",
-            "yum -y install nfs-utils",
-            "mkdir -p /mnt/efs",
-            !Join [ "", [ "mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ", !Ref MasterFileSystem, ".efs.", !Ref "AWS::Region", ".amazonaws.com:/ /mnt/efs" ] ],
-            "mkdir -p /mnt/efs/kubernetes /mnt/efs/etcd",
-            "ln -s /mnt/efs/etcd /var/lib/etcd",
-            "ln -s /mnt/efs/kubernetes /etc/kubernetes",
-            "echo Mounted EFS",
+            echo Mounting EFS
+            yum -y install nfs-utils
+            mkdir -p /mnt/efs
+            mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ${MasterFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /mnt/efs
+            mkdir -p /mnt/efs/kubernetes /mnt/efs/etcd
+            ln -s /mnt/efs/etcd /var/lib/etcd
+            ln -s /mnt/efs/kubernetes /etc/kubernetes
+            echo Mounted EFS
 
             # See https://docs.docker.com/engine/installation/linux/docker-ce/centos/#install-docker-ce
-            "echo Installing Docker",
-            "yum install -y yum-utils device-mapper-persistent-data lvm2",
-            "yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo",
-            "yum install -y docker-$DOCKER_VERSION",
-            "systemctl enable docker.service && systemctl start docker.service",
-            "echo Installed Docker",
+            echo Installing Docker
+            yum install -y yum-utils device-mapper-persistent-data lvm2
+            yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+            yum install -y docker-${DockerVersion}
+            systemctl enable docker.service && systemctl start docker.service
+            echo Installed Docker
 
             # See https://kubernetes.io/docs/setup/independent/install-kubeadm/
-            "echo Installing Kubernetes",
-            "cat <<EOF > /etc/yum.repos.d/kubernetes.repo",
-            "[kubernetes]",
-            "name=Kubernetes",
-            "baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64",
-            "enabled=1",
-            "gpgcheck=1",
-            "repo_gpgcheck=1",
-            "gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg",
-            "        https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg",
-            "EOF",
-            "setenforce 0",
-            "yum install -y kubelet-$K8S_VERSION kubeadm-$K8S_VERSION kubectl-$K8S_VERSION",
-            "systemctl enable kubelet && systemctl start kubelet",
-            "echo Installed Kubernetes",
+            echo Installing Kubernetes
+            cat <<EOF > /etc/yum.repos.d/kubernetes.repo
+            [kubernetes]
+            name=Kubernetes
+            baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+            enabled=1
+            gpgcheck=1
+            repo_gpgcheck=1
+            gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg
+                    https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+            EOF
+            setenforce 0
+            yum install -y kubelet-${KubernetesVersion} kubeadm-${KubernetesVersion} kubectl-${KubernetesVersion}
+            systemctl enable kubelet && systemctl start kubelet
+            echo Installed Kubernetes
             
             # See https://kubernetes.io/docs/setup/independent/create-cluster-kubeadm/
-            "if [ ! -f /etc/kubernetes/admin.conf ]; then",
-            "echo Initialising Kubernetes",
-            !Join [ " ", [ 
-              "kubeadm init",
-              "--kubernetes-version v$K8S_VERSION",
-              "--skip-token-print",
-              "--node-name master",
-              "--apiserver-cert-extra-sans", !GetAtt LoadBalancer.DNSName,
-              "--pod-network-cidr", !Ref PodNetworkCIDR,
-              "--token", !Ref KubernetesToken ] ],
-            "KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/v$K8S_FLANNEL/Documentation/kube-flannel.yml",
-            "echo Initialised Kubernetes",
-            "else",
-            "echo Kubernetes already initialised",
-            "fi"
-          ]
-        ]
+            if [ ! -f /etc/kubernetes/admin.conf ]; then
+              echo Initialising Kubernetes
+              kubeadm init --kubernetes-version v$K8S_VERSION       \
+                --skip-token-print                                  \
+                --node-name master                                  \
+                --apiserver-cert-extra-sans ${LoadBalancer.DNSName} \
+                --pod-network-cidr ${PodNetworkCIDR}                \
+                --token ${KubernetesToken}                          \
+              KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/v${FlannelVersion}/Documentation/kube-flannel.yml
+              echo Initialised Kubernetes
+            else
+              echo Kubernetes already initialised
+            fi
   MasterAutoscalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     DependsOn: MasterFileSystem
