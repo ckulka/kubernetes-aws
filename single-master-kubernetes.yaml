@@ -10,32 +10,67 @@ Parameters:
     Type: List<AWS::EC2::Subnet::Id>
   KeyName:
     Type: AWS::EC2::KeyPair::KeyName
+    Description: SSH Key for the EC2 instances
   KubernetesToken:
     Type: String
+    Default: "123456.1234567890123456"
+    AllowedPattern: ^[a-z0-9]{6}\.[a-z0-9]{16}$
+    Description: Token to join this Kubernetes cluster
+  PodNetworkCIDR:
+    Type: String
+    Default: "10.244.0.0/16"
+    Description: CIDR of the Pod Network used by Flannel
+  DockerVersion:
+    Type: String
+    Default: "1.12.6"
+    Description: |
+      Version of Docker to use. Must be compatible with Kubernetes, 
+      see https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG.md
+  KubernetesVersion:
+    Type: String
+    Default: "1.8.0"
+    Description: Version of Kubernetes to use, see https://github.com/kubernetes/kubernetes/releases
+  FlannelVersion:
+    Type: String
+    Default: "0.9.0"
+    Description: Version of Flannel to use, see https://github.com/coreos/flannel/releases
 
 Resources:
   # Load Balancer
   LoadBalancerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties: 
-      GroupName: !Join [ "-", [ !Ref AWS::StackName, "lb" ] ]
+      GroupName: !Join [ "-", [ !Ref "AWS::StackName", "lb" ] ]
       GroupDescription: Kubernetes Load Balancer Security Group
       Tags:
         - Key: Name
-          Value: !Join [ " ", [ "Kubernetes", !Ref AWS::StackName, "Load Balancer" ] ]
+          Value: !Join [ "-", [ !Ref "AWS::StackName", "lb" ] ]
       VpcId: !Ref VpcId
 
   # Load Balancer: Master
   MasterAPITargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: !Join [ "-", [ !Ref AWS::StackName, "master" ] ]
-      Tags:
-        - Key: Name
-          Value: !Join [ " ", [ !Ref AWS::StackName, "master" ] ]
+      Name: !Join [ "-", [ !Ref "AWS::StackName", "master" ] ]
       VpcId: !Ref VpcId
       Port: 6443
       Protocol: TCP
+  LoadBalancerSecurityGroupLBIngressRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref LoadBalancerSecurityGroup
+      CidrIp: "0.0.0.0/0"
+      IpProtocol: tcp
+      FromPort: 6443
+      ToPort: 6443
+  LoadBalancerSecurityGroupLBEgressRule:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref LoadBalancerSecurityGroup
+      DestinationSecurityGroupId: !Ref MasterSecurityGroup
+      IpProtocol: tcp
+      FromPort: 6443
+      ToPort: 6443
 
   # Master: File System
   MasterFileSystem:
@@ -43,7 +78,7 @@ Resources:
     Properties: 
       FileSystemTags:
         - Key: Name
-          Value: !Ref AWS::StackName
+          Value: !Join [ "-", [ !Ref "AWS::StackName", "master" ] ]
 
   # Master: Autoscaling Group
   MasterLaunchConfigurtion:
@@ -61,16 +96,79 @@ Resources:
             SnapshotId: snap-0c136bf135a86351f
             DeleteOnTermination: true
             VolumeSize: 25
+      UserData:
+        Fn::Base64: 
+          !Join [ "\n", [
+            "#!/bin/bash",
+            "DOCKER_VERSION=1.12.6",
+            "K8S_VERSION=1.8.0",
+            "K8S_FLANNEL=0.9.0",
+
+            # See http://docs.aws.amazon.com/efs/latest/ug/wt1-test.html
+            "echo Mounting EFS",
+            "yum -y install nfs-utils",
+            "mkdir -p /mnt/efs",
+            !Join [ "", [ "mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ", !Ref MasterFileSystem, ".efs.", !Ref "AWS::Region", ".amazonaws.com:/ /mnt/efs" ] ],
+            "mkdir -p /mnt/efs/kubernetes /mnt/efs/etcd",
+            "ln -s /mnt/efs/etcd /var/lib/etcd",
+            "ln -s /mnt/efs/kubernetes /etc/kubernetes",
+            "echo Mounted EFS",
+
+            # See https://docs.docker.com/engine/installation/linux/docker-ce/centos/#install-docker-ce
+            "echo Installing Docker",
+            "yum install -y yum-utils device-mapper-persistent-data lvm2",
+            "yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo",
+            "yum install -y docker-$DOCKER_VERSION",
+            "systemctl enable docker.service && systemctl start docker.service",
+            "echo Installed Docker",
+
+            # See https://kubernetes.io/docs/setup/independent/install-kubeadm/
+            "echo Installing Kubernetes",
+            "cat <<EOF > /etc/yum.repos.d/kubernetes.repo",
+            "[kubernetes]",
+            "name=Kubernetes",
+            "baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64",
+            "enabled=1",
+            "gpgcheck=1",
+            "repo_gpgcheck=1",
+            "gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg",
+            "        https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg",
+            "EOF",
+            "setenforce 0",
+            "yum install -y kubelet-$K8S_VERSION kubeadm-$K8S_VERSION kubectl-$K8S_VERSION",
+            "systemctl enable kubelet && systemctl start kubelet",
+            "echo Installed Kubernetes",
+            
+            # See https://kubernetes.io/docs/setup/independent/create-cluster-kubeadm/
+            "if [ ! -f /etc/kubernetes/admin.conf ]; then",
+            "echo Initialising Kubernetes",
+            !Join [ " ", [ 
+              "kubeadm init",
+              "--kubernetes-version v$K8S_VERSION",
+              "--skip-token-print",
+              "--node-name master",
+              # TODO "--apiserver-cert-extra-sans", !Ref LoadBalancer,
+              "--pod-network-cidr", !Ref PodNetworkCIDR,
+              "--token", !Ref KubernetesToken ] ],
+            "KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/v$K8S_FLANNEL/Documentation/kube-flannel.yml",
+            "echo Initialised Kubernetes",
+            "else",
+            "echo Kubernetes already initialised",
+            "fi"
+          ]
+        ]
   MasterAutoscalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: MasterFileSystem
     Properties:
       LaunchConfigurationName: !Ref MasterLaunchConfigurtion
       VPCZoneIdentifier: !Ref SubnetIDs
       MinSize: "0"
-      MaxSize: "0"
+      DesiredCapacity: "1"
+      MaxSize: "1"
       Tags:
         - Key: Name
-          Value: !Join [ " ", [ !Ref AWS::StackName, "master" ] ]
+          Value: !Join [ "-", [ !Ref "AWS::StackName", "master" ] ]
           PropagateAtLaunch: true
       TargetGroupARNs:
         - !Ref MasterAPITargetGroup
@@ -79,37 +177,23 @@ Resources:
   MasterSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties: 
-      GroupName: !Join [ "-", [ !Ref AWS::StackName, "master" ] ]
+      GroupName: !Join [ "-", [ !Ref "AWS::StackName", "master" ] ]
       GroupDescription: Kubernetes Master Security Group
+      VpcId: !Ref VpcId
       Tags:
         - Key: Name
-          Value: !Join [ " ", [ !Ref AWS::StackName, "Master" ] ]
-      VpcId: !Ref VpcId
+          Value: !Join [ "-", [ !Ref "AWS::StackName", "master" ] ]
   MasterSecurityGroupIngressRule:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !Ref MasterSecurityGroup
       SourceSecurityGroupId: !Ref MasterSecurityGroup
       IpProtocol: "-1"
-  MasterSecurityGroupEgressRule:
-    Type: AWS::EC2::SecurityGroupEgress
-    Properties:
-      GroupId: !Ref MasterSecurityGroup
-      DestinationSecurityGroupId: !Ref MasterSecurityGroup
-      IpProtocol: "-1"
   MasterSecurityGroupLBIngressRule:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !Ref MasterSecurityGroup
       SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
-      IpProtocol: tcp
-      FromPort: 6443
-      ToPort: 6443
-  MasterSecurityGroupLBEgressRule:
-    Type: AWS::EC2::SecurityGroupEgress
-    Properties:
-      GroupId: !Ref MasterSecurityGroup
-      DestinationSecurityGroupId: !Ref LoadBalancerSecurityGroup
       IpProtocol: tcp
       FromPort: 6443
       ToPort: 6443
