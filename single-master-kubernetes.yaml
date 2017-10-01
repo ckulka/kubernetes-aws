@@ -4,7 +4,7 @@ Description: CloudFormation template for a single-master Kubernetes cluster.
 
 Outputs:
   DNSName:
-    Description: The URL for the cluster.
+    Description: URL of the cluster.
     Value: !GetAtt LoadBalancer.DNSName
     Export:
       Name: !Sub "${AWS::StackName}-Endpoint"
@@ -103,6 +103,10 @@ Parameters:
     Type: String
     Default: "0.9.0"
     Description: Version of Flannel to use, see https://github.com/coreos/flannel/releases
+  TraefikVersion:
+    Type: String
+    Default: "1.4.0"
+    Description: Version of Traefik to use, see https://github.com/containous/traefik/releases
   MasterInstanceType:
     Type: String
     Default: t2.small
@@ -255,6 +259,99 @@ Resources:
                   - autoscaling:UpdateAutoScalingGroup
   MasterLaunchConfigurtion:
     Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init: 
+        configSets:
+          efs:
+            - efsConfig
+          default:
+            - installDocker
+            - installKubernetes
+          initCluster:
+            - initClusterConfig
+        installDocker:
+          # See https://docs.docker.com/engine/installation/linux/docker-ce/centos/#install-docker-ce
+          packages:
+            yum: 
+              yum-utils: []
+              device-mapper-persistent-data: []
+              lvm2: []
+          commands:
+            10addDockerRepo:
+              command: yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+            20installDocker:
+              command: !Sub yum install -y docker-${DockerVersion}
+            30startDocker:
+              command: systemctl enable docker.service && systemctl start docker.service
+        installKubernetes:
+          # See https://kubernetes.io/docs/setup/independent/install-kubeadm/
+          commands:
+            10disableSELinux:
+              command: setenforce 0
+            20installKubernetes:
+              command: !Sub yum install -y kubelet-${KubernetesVersion} kubeadm-${KubernetesVersion} kubectl-${KubernetesVersion}
+            30startKubernetes:
+              command: systemctl daemon-reload && systemctl enable kubelet && systemctl start kubelet
+          files:
+            /etc/yum.repos.d/kubernetes.repo:
+              content: |
+                [kubernetes]
+                name=Kubernetes
+                baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+                enabled=1
+                gpgcheck=1
+                repo_gpgcheck=1
+                gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg
+                        https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+            /etc/systemd/system/kubelet.service.d/20-cloud-provider.conf:
+              content: |
+                [Service]
+                Environment="KUBELET_EXTRA_ARGS=--cloud-provider=aws"
+        efsConfig:
+          # See http://docs.aws.amazon.com/efs/latest/ug/wt1-test.html
+          packages:
+            yum:
+              nfs-utils: []
+          commands:
+            10mountEfs:
+              command: bash /tmp/mount-efs.sh
+              test: "! mountpoint /mnt/efs"
+          files:
+            /tmp/mount-efs.sh:
+              content: !Sub |
+                #!/bin/bash
+                mkdir -p /mnt/efs
+                mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ${MasterFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /mnt/efs
+                mkdir -p /mnt/efs/kubernetes /mnt/efs/etcd
+                ln -s /mnt/efs/etcd /var/lib/etcd
+                ln -s /mnt/efs/kubernetes /etc/kubernetes
+        initClusterConfig:
+          commands:
+            initialiseKubernetes:
+              command: bash /tmp/kubernetes-init.sh
+              test: "! test -e /etc/kubernetes/admin.conf"
+          files:
+            /tmp/kubernetes-init.sh:
+              content: !Sub |
+                #!/bin/bash
+                # See https://kubernetes.io/docs/setup/independent/create-cluster-kubeadm/
+                kubeadm init                                            \
+                  --kubernetes-version v${KubernetesVersion}            \
+                  --pod-network-cidr ${PodNetworkCIDR}                  \
+                  --node-name $(curl http://169.254.169.254/latest/meta-data/hostname) \
+                  --apiserver-advertise-address ${LoadBalancer.DNSName} \
+                  --apiserver-cert-extra-sans ${LoadBalancer.DNSName}   \
+                  --token ${KubernetesToken}                            \
+                  --token-ttl 0
+                
+                export KUBECONFIG=/etc/kubernetes/admin.conf
+
+                # See https://github.com/coreos/flannel
+                kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/v${FlannelVersion}/Documentation/kube-flannel.yml
+
+                # See https://docs.traefik.io/user-guide/kubernetes/
+                kubectl apply -f https://raw.githubusercontent.com/containous/traefik/${TraefikVersion}/examples/k8s/traefik-rbac.yaml
+                kubectl apply -f https://raw.githubusercontent.com/containous/traefik/${TraefikVersion}/examples/k8s/traefik-ds.yaml
     Properties:
       SecurityGroups: 
         - !Ref MasterSecurityGroup
@@ -274,63 +371,13 @@ Resources:
           !Sub |
             #!/bin/bash
 
-            # See http://docs.aws.amazon.com/efs/latest/ug/wt1-test.html
-            echo Mounting EFS
-            yum -y install nfs-utils
-            mkdir -p /mnt/efs
-            mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ${MasterFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /mnt/efs
-            mkdir -p /mnt/efs/kubernetes /mnt/efs/etcd
-            ln -s /mnt/efs/etcd /var/lib/etcd
-            ln -s /mnt/efs/kubernetes /etc/kubernetes
-            echo Mounted EFS
+            # See http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-helper-scripts-reference.html
+            easy_install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz
 
-            # See https://docs.docker.com/engine/installation/linux/docker-ce/centos/#install-docker-ce
-            echo Installing Docker
-            yum install -y yum-utils device-mapper-persistent-data lvm2
-            yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-            yum install -y docker-${DockerVersion}
-            systemctl enable docker.service && systemctl start docker.service
-            echo Installed Docker
-
-            # See https://kubernetes.io/docs/setup/independent/install-kubeadm/
-            echo Installing Kubernetes
-            cat <<EOF > /etc/yum.repos.d/kubernetes.repo
-            [kubernetes]
-            name=Kubernetes
-            baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
-            enabled=1
-            gpgcheck=1
-            repo_gpgcheck=1
-            gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg
-                    https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
-            EOF
-            setenforce 0
-            yum install -y kubelet-${KubernetesVersion} kubeadm-${KubernetesVersion} kubectl-${KubernetesVersion}
-            # sed -i 's/systemd/cgroupfs/' /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
-            cat <<EOF > /etc/systemd/system/kubelet.service.d/20-cloud-provider.conf
-            [Service]
-            Environment="KUBELET_EXTRA_ARGS=--cloud-provider=aws"
-            EOF
-            systemctl daemon-reload
-            systemctl enable kubelet
-            systemctl start kubelet
-            echo Installed Kubernetes
-            
-            # See https://kubernetes.io/docs/setup/independent/create-cluster-kubeadm/
-            if [ ! -f /etc/kubernetes/admin.conf ]; then
-              echo Initialising Kubernetes
-              kubeadm init                                            \
-                --kubernetes-version v${KubernetesVersion}            \
-                --pod-network-cidr ${PodNetworkCIDR}                  \
-                --apiserver-advertise-address ${LoadBalancer.DNSName} \
-                --apiserver-cert-extra-sans ${LoadBalancer.DNSName}   \
-                --token ${KubernetesToken}                            \
-                --token-ttl 0
-              KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/v${FlannelVersion}/Documentation/kube-flannel.yml
-              echo Initialised Kubernetes
-            else
-              echo Kubernetes already initialised
-            fi
+            # See http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-init.html
+            cfn-init --stack ${AWS::StackName} --resource MasterLaunchConfigurtion --configsets efs
+            cfn-init --stack ${AWS::StackName} --resource MasterLaunchConfigurtion --configsets default
+            cfn-init --stack ${AWS::StackName} --resource MasterLaunchConfigurtion --configsets initCluster
   MasterAutoscalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     DependsOn: MasterFileSystem
@@ -345,6 +392,9 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub ${ClusterName}-master
+          PropagateAtLaunch: true
+        - Key: KubernetesCluster
+          Value: !Ref ClusterName
           PropagateAtLaunch: true
       TargetGroupARNs:
         - !Ref MasterAPITargetGroup
@@ -375,15 +425,63 @@ Resources:
       SourceSecurityGroupId: !Ref MasterSecurityGroup
       IpProtocol: "-1"
 
+  # Node
+  NodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /kubernetes/
+      Roles:
+        - !Ref NodeRole
+  NodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ClusterName}-node
+      Path: /kubernetes/
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal: 
+              Service: 
+                - "ec2.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Sub ${ClusterName}-node
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement: 
+              - Effect: "Allow"
+                Resource: "*"
+                Action: 
+                  - ec2:Describe*
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:GetRepositoryPolicy
+                  - ecr:DescribeRepositories
+                  - ecr:ListImages
+                  - ecr:BatchGetImage
   # Node: Autoscaling Group
   NodeLaunchConfigurtion:
     Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init: 
+        configSets:
+          joinCluster:
+            - joinClusterConfig
+        joinClusterConfig:
+          # See https://kubernetes.io/docs/admin/kubeadm/#kubeadm-join
+          commands:
+            10join:
+              command: !Sub kubeadm join --token ${KubernetesToken} --discovery-token-unsafe-skip-ca-verification ${LoadBalancer.DNSName}:6443
     Properties:
-      SecurityGroups: 
-        - !Ref NodeSecurityGroup
       ImageId: !Ref ImageId
       InstanceType: !Ref NodeInstanceType
-      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref NodeInstanceProfile
+      KeyName: !If [ HasKeyName, !Ref KeyName, !Ref "AWS::NoValue" ]
+      SecurityGroups: 
+        - !Ref NodeSecurityGroup
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs: 
@@ -395,37 +493,13 @@ Resources:
         Fn::Base64: 
           !Sub |
             #!/bin/bash
-            # See https://docs.docker.com/engine/installation/linux/docker-ce/centos/#install-docker-ce
-            echo Installing Docker
-            yum install -y yum-utils device-mapper-persistent-data lvm2
-            yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-            yum install -y docker-${DockerVersion}
-            systemctl enable docker.service && systemctl start docker.service
-            echo Installed Docker
-
-            # See https://kubernetes.io/docs/setup/independent/install-kubeadm/
-            echo Installing Kubernetes
-            cat <<EOF > /etc/yum.repos.d/kubernetes.repo
-            [kubernetes]
-            name=Kubernetes
-            baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
-            enabled=1
-            gpgcheck=1
-            repo_gpgcheck=1
-            gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg
-                    https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
-            EOF
-            setenforce 0
-            yum install -y kubelet-${KubernetesVersion} kubeadm-${KubernetesVersion} kubectl-${KubernetesVersion}
-            systemctl daemon-reload
-            systemctl enable kubelet
-            systemctl start kubelet
-            echo Installed Kubernetes
             
-            # See https://kubernetes.io/docs/admin/kubeadm/#kubeadm-join
-            echo Joining the cluster
-            kubeadm join --token ${KubernetesToken} --discovery-token-unsafe-skip-ca-verification ${LoadBalancer.DNSName}:6443
-            echo Joined the cluster
+            # See http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-helper-scripts-reference.html
+            easy_install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz
+
+            # See http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-init.html
+            cfn-init --stack ${AWS::StackName} --resource MasterLaunchConfigurtion --configsets default
+            cfn-init --stack ${AWS::StackName} --resource NodeLaunchConfigurtion --configsets joinCluster
   NodeAutoscalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
@@ -439,6 +513,9 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub ${ClusterName}-node
+          PropagateAtLaunch: true
+        - Key: KubernetesCluster
+          Value: !Ref ClusterName
           PropagateAtLaunch: true
       TargetGroupARNs:
         - !Ref NodeHTTPTargetGroup
@@ -454,6 +531,8 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub ${ClusterName}-node
+        - Key: KubernetesCluster
+          Value: !Ref ClusterName
       SecurityGroupIngress:
         - CidrIp: "0.0.0.0/0"
           IpProtocol: tcp
