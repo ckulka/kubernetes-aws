@@ -9,6 +9,50 @@ Outputs:
     Export:
       Name: !Sub "${AWS::StackName}-Endpoint"
 
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: 
+          default: AWS Placement
+        Parameters:
+          - VpcId
+          - SubnetId1
+          - SubnetId2
+          - LoadBalancerScheme
+      - Label:
+          default: Kubernetes Configuration
+        Parameters:
+          - ClusterName
+          - KubernetesToken
+          - PodNetworkCIDR
+          - KubernetesVersion
+          - DockerVersion
+          - FlannelVersion
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - KeyName
+          - MasterInstanceType
+          - NodeInstanceType
+          - ImageId
+    ParameterLabels:
+      ClusterName:
+        default: Cluster Name
+      MasterInstanceType: 
+        default: Instance Type (Master)
+      NodeInstanceType: 
+        default: Instance Type (Node)
+      ImageId:
+        default: Amazon Machine Image
+      VpcId:
+        default: VPC ID
+      KubernetesVersion:
+        default: Kubernetes Version
+      DockerVersion:
+        default: Docker Version
+      FlannelVersion:
+        default: Flannel Version
+
 Parameters:
   VpcId:
     Type: AWS::EC2::VPC::Id
@@ -26,6 +70,11 @@ Parameters:
     AllowedValues:
       - internet-facing
       - internal
+  ClusterName:
+    Type: String
+    Default: k8s01
+    Description: Name of the cluster.
+    AllowedPattern: ^[\w\.-]+$
   KubernetesToken:
     Type: String
     Default: "123456.1234567890123456"
@@ -75,53 +124,16 @@ Parameters:
     Default: ami-46c1b650
     Description: AMI to use for the EC2 instances
 
-Metadata:
-  AWS::CloudFormation::Interface:
-    ParameterGroups:
-      - Label: 
-          default: AWS Placement
-        Parameters:
-          - VpcId
-          - SubnetId1
-          - SubnetId2
-          - LoadBalancerScheme
-      - Label:
-          default: Kubernetes Configuration
-        Parameters:
-          - KubernetesToken
-          - PodNetworkCIDR
-          - KubernetesVersion
-          - DockerVersion
-          - FlannelVersion
-      - Label:
-          default: Instance Configuration
-        Parameters:
-          - KeyName
-          - MasterInstanceType
-          - NodeInstanceType
-          - ImageId
-    ParameterLabels:
-      MasterInstanceType: 
-        default: Instance Type (Master)
-      NodeInstanceType: 
-        default: Instance Type (Node)
-      ImageId:
-        default: Amazon Machine Image
-      VpcId:
-        default: VPC ID
-      KubernetesVersion:
-        default: Kubernetes Version
-      DockerVersion:
-        default: Docker Version
-      FlannelVersion:
-        default: Flannel Version
+Conditions:
+  HasKeyName:
+    !Not [ !Equals [ !Ref KeyName, "" ] ]
 
 Resources:
   # Load Balancer
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
-      Name: !Ref AWS::StackName
+      Name: !Ref ClusterName
       Type: network
       Scheme: !Ref LoadBalancerScheme
       Subnets: 
@@ -141,7 +153,7 @@ Resources:
   MasterAPITargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: !Sub ${AWS::StackName}-master
+      Name: !Sub ${ClusterName}-master
       VpcId: !Ref VpcId
       Port: 6443
       Protocol: TCP
@@ -159,7 +171,7 @@ Resources:
   NodeHTTPTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: !Sub ${AWS::StackName}-http
+      Name: !Sub ${ClusterName}-http
       VpcId: !Ref VpcId
       Port: 80
       Protocol: TCP
@@ -175,7 +187,7 @@ Resources:
   NodeHTTPSTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: !Sub ${AWS::StackName}-https
+      Name: !Sub ${ClusterName}-https
       VpcId: !Ref VpcId
       Port: 443
       Protocol: TCP
@@ -186,7 +198,7 @@ Resources:
     Properties: 
       FileSystemTags:
         - Key: Name
-          Value: !Sub ${AWS::StackName}-master
+          Value: !Sub ${ClusterName}-master
   MasterSubnetId1MountTarget:
     Type: AWS::EFS::MountTarget
     Properties: 
@@ -202,15 +214,135 @@ Resources:
       SecurityGroups: 
         - !Ref MasterSecurityGroup
 
-  # Master: Autoscaling Group
+  # Master
+  MasterInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /kubernetes/
+      Roles:
+        - !Ref MasterRole
+  MasterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ClusterName}-master
+      Path: /kubernetes/
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal: 
+              Service: 
+                - "ec2.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Sub ${ClusterName}-master
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement: 
+              - Effect: "Allow"
+                Resource: "*"
+                Action: 
+                  - ec2:*
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:GetRepositoryPolicy
+                  - ecr:DescribeRepositories
+                  - ecr:ListImages
+                  - ecr:BatchGetImage
+                  - autoscaling:DescribeAutoScalingGroups
+                  - autoscaling:UpdateAutoScalingGroup
   MasterLaunchConfigurtion:
     Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init: 
+        configSets:
+          base:
+            - efsConfig
+            - installDocker
+            - installKubernetes
+            - kubernetesInitialisiationConfig
+        installDocker:
+          # See https://docs.docker.com/engine/installation/linux/docker-ce/centos/#install-docker-ce
+          packages:
+            yum: 
+              yum-utils: []
+              device-mapper-persistent-data: []
+              lvm2: []
+          commands:
+            10addDockerRepo:
+              command: yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+            20installDocker:
+              command: !Sub yum install -y docker-${DockerVersion}
+            30startDocker:
+              command: systemctl enable docker.service && systemctl start docker.service
+        installKubernetes:
+          # See https://kubernetes.io/docs/setup/independent/install-kubeadm/
+          commands:
+            10disableSELinux:
+              command: setenforce 0
+            20installKubernetes:
+              command: !Sub yum install -y kubelet-${KubernetesVersion} kubeadm-${KubernetesVersion} kubectl-${KubernetesVersion}
+            30 startKubernetes:
+              command: systemctl daemon-reload && systemctl enable kubelet && systemctl start kubelet
+          files:
+            /etc/yum.repos.d/kubernetes.repo:
+              content: |
+                [kubernetes]
+                name=Kubernetes
+                baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+                enabled=1
+                gpgcheck=1
+                repo_gpgcheck=1
+                gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg
+                        https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+            /etc/systemd/system/kubelet.service.d/20-cloud-provider.conf:
+              content: |
+                [Service]
+                Environment="KUBELET_EXTRA_ARGS=--cloud-provider=aws"
+        efsConfig:
+          # See http://docs.aws.amazon.com/efs/latest/ug/wt1-test.html
+          packages:
+            yum:
+              nfs-utils: []
+          commands:
+            mountEfs:
+              command: bash /tmp/mount-efs.sh
+          files:
+            /tmp/mount-efs.sh:
+              content: !Sub |
+                #!/bin/bash
+                mkdir -p /mnt/efs
+                mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ${MasterFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /mnt/efs
+                mkdir -p /mnt/efs/kubernetes /mnt/efs/etcd
+                ln -s /mnt/efs/etcd /var/lib/etcd
+                ln -s /mnt/efs/kubernetes /etc/kubernetes
+        kubernetesInitialisiationConfig:
+          commands:
+            initialiseKubernetes:
+              command: bash /tmp/kubernetes-init.sh
+              test: "! test -e /etc/kubernetes/admin.conf"
+          files:
+            /tmp/kubernetes-init.sh:
+              content: !Sub |
+                #!/bin/bash
+                # See https://kubernetes.io/docs/setup/independent/create-cluster-kubeadm/
+                kubeadm init                                            \
+                  --kubernetes-version v${KubernetesVersion}            \
+                  --pod-network-cidr ${PodNetworkCIDR}                  \
+                  --apiserver-advertise-address ${LoadBalancer.DNSName} \
+                  --apiserver-cert-extra-sans ${LoadBalancer.DNSName}   \
+                  --token ${KubernetesToken}                            \
+                  --token-ttl 0
+                KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/v${FlannelVersion}/Documentation/kube-flannel.yml
     Properties:
       SecurityGroups: 
         - !Ref MasterSecurityGroup
       ImageId: !Ref ImageId
       InstanceType: !Ref MasterInstanceType
-      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref MasterInstanceProfile
+      KeyName: !If [ HasKeyName, !Ref KeyName, !Ref "AWS::NoValue" ]
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs: 
@@ -222,58 +354,7 @@ Resources:
         Fn::Base64: 
           !Sub |
             #!/bin/bash
-            # See http://docs.aws.amazon.com/efs/latest/ug/wt1-test.html
-            echo Mounting EFS
-            yum -y install nfs-utils
-            mkdir -p /mnt/efs
-            mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ${MasterFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /mnt/efs
-            mkdir -p /mnt/efs/kubernetes /mnt/efs/etcd
-            ln -s /mnt/efs/etcd /var/lib/etcd
-            ln -s /mnt/efs/kubernetes /etc/kubernetes
-            echo Mounted EFS
-
-            # See https://docs.docker.com/engine/installation/linux/docker-ce/centos/#install-docker-ce
-            echo Installing Docker
-            yum install -y yum-utils device-mapper-persistent-data lvm2
-            yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-            yum install -y docker-${DockerVersion}
-            systemctl enable docker.service && systemctl start docker.service
-            echo Installed Docker
-
-            # See https://kubernetes.io/docs/setup/independent/install-kubeadm/
-            echo Installing Kubernetes
-            cat <<EOF > /etc/yum.repos.d/kubernetes.repo
-            [kubernetes]
-            name=Kubernetes
-            baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
-            enabled=1
-            gpgcheck=1
-            repo_gpgcheck=1
-            gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg
-                    https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
-            EOF
-            setenforce 0
-            yum install -y kubelet-${KubernetesVersion} kubeadm-${KubernetesVersion} kubectl-${KubernetesVersion}
-            sed -i 's/systemd/cgroupfs/' /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
-            systemctl daemon-reload
-            systemctl enable kubelet
-            systemctl start kubelet
-            echo Installed Kubernetes
-            
-            # See https://kubernetes.io/docs/setup/independent/create-cluster-kubeadm/
-            if [ ! -f /etc/kubernetes/admin.conf ]; then
-              echo Initialising Kubernetes
-              kubeadm init                                            \
-                --kubernetes-version v${KubernetesVersion}            \
-                --cloud-provider=aws                                  \
-                --apiserver-cert-extra-sans ${LoadBalancer.DNSName}   \
-                --pod-network-cidr ${PodNetworkCIDR}                  \
-                --token ${KubernetesToken}
-              KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/v${FlannelVersion}/Documentation/kube-flannel.yml
-              echo Initialised Kubernetes
-            else
-              echo Kubernetes already initialised
-            fi
+            cfn-init -c base
   MasterAutoscalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     DependsOn: MasterFileSystem
@@ -287,7 +368,7 @@ Resources:
       MaxSize: "1"
       Tags:
         - Key: Name
-          Value: !Sub ${AWS::StackName}-master
+          Value: !Sub ${ClusterName}-master
           PropagateAtLaunch: true
       TargetGroupARNs:
         - !Ref MasterAPITargetGroup
@@ -296,12 +377,12 @@ Resources:
   MasterSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties: 
-      GroupName: !Sub ${AWS::StackName}-master
+      GroupName: !Sub ${ClusterName}-master
       GroupDescription: Kubernetes Master Security Group
       VpcId: !Ref VpcId
       Tags:
         - Key: Name
-          Value: !Sub ${AWS::StackName}-master
+          Value: !Sub ${ClusterName}-master
       SecurityGroupIngress:
         - CidrIp: "0.0.0.0/0"
           IpProtocol: tcp
@@ -381,7 +462,7 @@ Resources:
       MaxSize: "4"
       Tags:
         - Key: Name
-          Value: !Sub ${AWS::StackName}-node
+          Value: !Sub ${ClusterName}-node
           PropagateAtLaunch: true
       TargetGroupARNs:
         - !Ref NodeHTTPTargetGroup
@@ -391,12 +472,12 @@ Resources:
   NodeSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties: 
-      GroupName: !Sub ${AWS::StackName}-node
+      GroupName: !Sub ${ClusterName}-node
       GroupDescription: Kubernetes Node Security Group
       VpcId: !Ref VpcId
       Tags:
         - Key: Name
-          Value: !Sub ${AWS::StackName}-node
+          Value: !Sub ${ClusterName}-node
       SecurityGroupIngress:
         - CidrIp: "0.0.0.0/0"
           IpProtocol: tcp
