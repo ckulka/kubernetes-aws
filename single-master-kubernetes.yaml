@@ -255,87 +255,6 @@ Resources:
                   - autoscaling:UpdateAutoScalingGroup
   MasterLaunchConfigurtion:
     Type: AWS::AutoScaling::LaunchConfiguration
-    Metadata:
-      AWS::CloudFormation::Init: 
-        configSets:
-          base:
-            - efsConfig
-            - installDocker
-            - installKubernetes
-            - kubernetesInitialisiationConfig
-        installDocker:
-          # See https://docs.docker.com/engine/installation/linux/docker-ce/centos/#install-docker-ce
-          packages:
-            yum: 
-              yum-utils: []
-              device-mapper-persistent-data: []
-              lvm2: []
-          commands:
-            10addDockerRepo:
-              command: yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-            20installDocker:
-              command: !Sub yum install -y docker-${DockerVersion}
-            30startDocker:
-              command: systemctl enable docker.service && systemctl start docker.service
-        installKubernetes:
-          # See https://kubernetes.io/docs/setup/independent/install-kubeadm/
-          commands:
-            10disableSELinux:
-              command: setenforce 0
-            20installKubernetes:
-              command: !Sub yum install -y kubelet-${KubernetesVersion} kubeadm-${KubernetesVersion} kubectl-${KubernetesVersion}
-            30 startKubernetes:
-              command: systemctl daemon-reload && systemctl enable kubelet && systemctl start kubelet
-          files:
-            /etc/yum.repos.d/kubernetes.repo:
-              content: |
-                [kubernetes]
-                name=Kubernetes
-                baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
-                enabled=1
-                gpgcheck=1
-                repo_gpgcheck=1
-                gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg
-                        https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
-            /etc/systemd/system/kubelet.service.d/20-cloud-provider.conf:
-              content: |
-                [Service]
-                Environment="KUBELET_EXTRA_ARGS=--cloud-provider=aws"
-        efsConfig:
-          # See http://docs.aws.amazon.com/efs/latest/ug/wt1-test.html
-          packages:
-            yum:
-              nfs-utils: []
-          commands:
-            mountEfs:
-              command: bash /tmp/mount-efs.sh
-          files:
-            /tmp/mount-efs.sh:
-              content: !Sub |
-                #!/bin/bash
-                mkdir -p /mnt/efs
-                mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ${MasterFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /mnt/efs
-                mkdir -p /mnt/efs/kubernetes /mnt/efs/etcd
-                ln -s /mnt/efs/etcd /var/lib/etcd
-                ln -s /mnt/efs/kubernetes /etc/kubernetes
-        kubernetesInitialisiationConfig:
-          commands:
-            initialiseKubernetes:
-              command: bash /tmp/kubernetes-init.sh
-              test: "! test -e /etc/kubernetes/admin.conf"
-          files:
-            /tmp/kubernetes-init.sh:
-              content: !Sub |
-                #!/bin/bash
-                # See https://kubernetes.io/docs/setup/independent/create-cluster-kubeadm/
-                kubeadm init                                            \
-                  --kubernetes-version v${KubernetesVersion}            \
-                  --pod-network-cidr ${PodNetworkCIDR}                  \
-                  --apiserver-advertise-address ${LoadBalancer.DNSName} \
-                  --apiserver-cert-extra-sans ${LoadBalancer.DNSName}   \
-                  --token ${KubernetesToken}                            \
-                  --token-ttl 0
-                KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/v${FlannelVersion}/Documentation/kube-flannel.yml
     Properties:
       SecurityGroups: 
         - !Ref MasterSecurityGroup
@@ -354,7 +273,64 @@ Resources:
         Fn::Base64: 
           !Sub |
             #!/bin/bash
-            cfn-init -c base
+
+            # See http://docs.aws.amazon.com/efs/latest/ug/wt1-test.html
+            echo Mounting EFS
+            yum -y install nfs-utils
+            mkdir -p /mnt/efs
+            mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ${MasterFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /mnt/efs
+            mkdir -p /mnt/efs/kubernetes /mnt/efs/etcd
+            ln -s /mnt/efs/etcd /var/lib/etcd
+            ln -s /mnt/efs/kubernetes /etc/kubernetes
+            echo Mounted EFS
+
+            # See https://docs.docker.com/engine/installation/linux/docker-ce/centos/#install-docker-ce
+            echo Installing Docker
+            yum install -y yum-utils device-mapper-persistent-data lvm2
+            yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+            yum install -y docker-${DockerVersion}
+            systemctl enable docker.service && systemctl start docker.service
+            echo Installed Docker
+
+            # See https://kubernetes.io/docs/setup/independent/install-kubeadm/
+            echo Installing Kubernetes
+            cat <<EOF > /etc/yum.repos.d/kubernetes.repo
+            [kubernetes]
+            name=Kubernetes
+            baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+            enabled=1
+            gpgcheck=1
+            repo_gpgcheck=1
+            gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg
+                    https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+            EOF
+            setenforce 0
+            yum install -y kubelet-${KubernetesVersion} kubeadm-${KubernetesVersion} kubectl-${KubernetesVersion}
+            # sed -i 's/systemd/cgroupfs/' /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+            cat <<EOF > /etc/systemd/system/kubelet.service.d/20-cloud-provider.conf
+            [Service]
+            Environment="KUBELET_EXTRA_ARGS=--cloud-provider=aws"
+            EOF
+            systemctl daemon-reload
+            systemctl enable kubelet
+            systemctl start kubelet
+            echo Installed Kubernetes
+            
+            # See https://kubernetes.io/docs/setup/independent/create-cluster-kubeadm/
+            if [ ! -f /etc/kubernetes/admin.conf ]; then
+              echo Initialising Kubernetes
+              kubeadm init                                            \
+                --kubernetes-version v${KubernetesVersion}            \
+                --pod-network-cidr ${PodNetworkCIDR}                  \
+                --apiserver-advertise-address ${LoadBalancer.DNSName} \
+                --apiserver-cert-extra-sans ${LoadBalancer.DNSName}   \
+                --token ${KubernetesToken}                            \
+                --token-ttl 0
+              KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/v${FlannelVersion}/Documentation/kube-flannel.yml
+              echo Initialised Kubernetes
+            else
+              echo Kubernetes already initialised
+            fi
   MasterAutoscalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     DependsOn: MasterFileSystem
