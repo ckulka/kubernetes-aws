@@ -28,6 +28,7 @@ Metadata:
           - KubernetesVersion
           - DockerVersion
           - FlannelVersion
+          - TraefikVersion
       - Label:
           default: Instance Configuration
         Parameters:
@@ -52,6 +53,8 @@ Metadata:
         default: Docker Version
       FlannelVersion:
         default: Flannel Version
+      TraefikVersion:
+        default: Traefik Version
 
 Parameters:
   VpcId:
@@ -72,9 +75,9 @@ Parameters:
       - internal
   ClusterName:
     Type: String
-    Default: k8s01
-    Description: Name of the cluster.
-    AllowedPattern: ^[\w\.-]+$
+    Default: awseu1k8s01
+    Description: Unique name of the cluster.
+    AllowedPattern: ^[\w\.-]{1,25}$
   KubernetesToken:
     Type: String
     Default: "123456.1234567890123456"
@@ -86,7 +89,7 @@ Parameters:
   PodNetworkCIDR:
     Type: String
     Default: "10.244.0.0/16"
-    Description: CIDR of the overlay network (Flannel), should not conflict with an existing subnet.
+    Description: CIDR of the overlay network (Flannel), should not conflict with existing subnets.
     MinLength: 10
     MaxLength: 19
   DockerVersion:
@@ -105,7 +108,7 @@ Parameters:
     Description: Version of Flannel to use, see https://github.com/coreos/flannel/releases
   TraefikVersion:
     Type: String
-    Default: "1.4.0"
+    Default: "1.4"
     Description: Version of Traefik to use, see https://github.com/containous/traefik/releases
   MasterInstanceType:
     Type: String
@@ -140,9 +143,22 @@ Resources:
       Name: !Ref ClusterName
       Type: network
       Scheme: !Ref LoadBalancerScheme
-      Subnets: 
-        - !Ref SubnetId1
-#        - !Ref SubnetId2 TODO
+      SubnetMappings:
+        - AllocationId: !GetAtt [ Subnet1EIP, AllocationId ]
+          SubnetId: !Ref SubnetId1
+        - AllocationId: !GetAtt [ Subnet2EIP, AllocationId ]
+          SubnetId: !Ref SubnetId2
+      Tags:
+        - Key: Name
+          Value: !Ref ClusterName
+  Subnet1EIP:
+    Type: 'AWS::EC2::EIP'
+    Properties:
+      Domain: vpc
+  Subnet2EIP:
+    Type: 'AWS::EC2::EIP'
+    Properties:
+      Domain: vpc
 
   # Load Balancer: Master
   MasterAPIListener:
@@ -218,7 +234,7 @@ Resources:
       SecurityGroups: 
         - !Ref MasterSecurityGroup
 
-  # Master
+  # Master: IAM Role
   MasterInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
@@ -239,6 +255,7 @@ Resources:
                 - "ec2.amazonaws.com"
             Action: 
               - "sts:AssumeRole"
+      # See https://docs.google.com/document/d/17d4qinC_HnIwrK0GHnRlD1FKkTNdN__VO4TH9-EzbIY/edit
       Policies:
         - PolicyName: !Sub ${ClusterName}-master
           PolicyDocument: 
@@ -335,13 +352,13 @@ Resources:
               content: !Sub |
                 #!/bin/bash
                 # See https://kubernetes.io/docs/setup/independent/create-cluster-kubeadm/
-                kubeadm init                                            \
-                  --kubernetes-version v${KubernetesVersion}            \
-                  --pod-network-cidr ${PodNetworkCIDR}                  \
-                  --node-name $(curl http://169.254.169.254/latest/meta-data/hostname) \
-                  --apiserver-advertise-address ${LoadBalancer.DNSName} \
-                  --apiserver-cert-extra-sans ${LoadBalancer.DNSName}   \
-                  --token ${KubernetesToken}                            \
+                kubeadm init                                                            \
+                  --kubernetes-version v${KubernetesVersion}                            \
+                  --pod-network-cidr ${PodNetworkCIDR}                                  \
+                  --node-name $(curl http://169.254.169.254/latest/meta-data/hostname)  \
+                  --apiserver-advertise-address ${LoadBalancer.DNSName}                 \
+                  --apiserver-cert-extra-sans ${LoadBalancer.DNSName}                   \
+                  --token ${KubernetesToken}                                            \
                   --token-ttl 0
                 
                 export KUBECONFIG=/etc/kubernetes/admin.conf
@@ -350,8 +367,8 @@ Resources:
                 kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/v${FlannelVersion}/Documentation/kube-flannel.yml
 
                 # See https://docs.traefik.io/user-guide/kubernetes/
-                kubectl apply -f https://raw.githubusercontent.com/containous/traefik/${TraefikVersion}/examples/k8s/traefik-rbac.yaml
-                kubectl apply -f https://raw.githubusercontent.com/containous/traefik/${TraefikVersion}/examples/k8s/traefik-ds.yaml
+                kubectl apply -f https://raw.githubusercontent.com/containous/traefik/v${TraefikVersion}/examples/k8s/traefik-rbac.yaml
+                kubectl apply -f https://raw.githubusercontent.com/containous/traefik/v${TraefikVersion}/examples/k8s/traefik-ds.yaml
     Properties:
       SecurityGroups: 
         - !Ref MasterSecurityGroup
@@ -385,7 +402,7 @@ Resources:
       LaunchConfigurationName: !Ref MasterLaunchConfigurtion
       VPCZoneIdentifier: 
         - !Ref SubnetId1
-#        - !Ref SubnetId2 TODO
+        - !Ref SubnetId2
       MinSize: "0"
       DesiredCapacity: "1"
       MaxSize: "1"
@@ -425,7 +442,7 @@ Resources:
       SourceSecurityGroupId: !Ref MasterSecurityGroup
       IpProtocol: "-1"
 
-  # Node
+  # Node: IAM Role
   NodeInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
@@ -446,6 +463,7 @@ Resources:
                 - "ec2.amazonaws.com"
             Action: 
               - "sts:AssumeRole"
+      # See https://docs.google.com/document/d/17d4qinC_HnIwrK0GHnRlD1FKkTNdN__VO4TH9-EzbIY/edit
       Policies:
         - PolicyName: !Sub ${ClusterName}-node
           PolicyDocument: 
@@ -506,7 +524,7 @@ Resources:
       LaunchConfigurationName: !Ref NodeLaunchConfigurtion
       VPCZoneIdentifier: 
         - !Ref SubnetId1
-#        - !Ref SubnetId2 TODO
+        - !Ref SubnetId2
       MinSize: "0"
       DesiredCapacity: "0"
       MaxSize: "4"
