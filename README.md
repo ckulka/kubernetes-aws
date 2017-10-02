@@ -8,7 +8,9 @@ The `single-master-kubernetes.yaml` CloudFormation template creates a Kubernetes
 
 The current setup requires exactly two subnets for the cluster to be deployed to.
 
-### Main Parameters
+During the initial cluster initialisation with `kubeadm`, this template also deploys the [Flannel](https://coreos.com/flannel/docs/latest/) ([Github](https://github.com/coreos/flannel)) overlay network as well as [Traefik](https://traefik.io/) ([Github](https://github.com/containous/traefik)) as ingress controller.
+
+### Input & Output Parameters
 
 The template has several parameters, the most important ones are
 
@@ -16,18 +18,22 @@ The template has several parameters, the most important ones are
 - Versions for Docker, Kubernetes, Flannel and Traefik
 - Instance Types for the master and node instances
 
-### Main Resources
+The template's output is the load balanced URL for the cluster.
+
+### Resources
+
+The following list only outlines the most important resources.
 
 - Network Load Balancer
   - Routes HTTP(S) traffic to the nodes
   - Routes Kubernetes API (6443) requests to the master
-- Master
+- Cluster Master
   - EFS
   - Autoscaling Group
   - Launch Configuration
   - Security Group
   - IAM Instance Role
-- Node instance
+- Cluster Node
   - Autoscaling Group
   - Launch Configuration
   - Security Group
@@ -36,7 +42,7 @@ The template has several parameters, the most important ones are
 ### TODO
 
 - Master failover testing
+- Find a better solution for the extended EBS volumes
 - Further restrict Master IAM Instance Role
 - Further restrict Node IAM Instance Role
-- Further restrict Master Security Group
 - Further restrict Node Security Group

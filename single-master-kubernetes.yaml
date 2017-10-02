@@ -235,6 +235,7 @@ Resources:
         - !Ref MasterSecurityGroup
 
   # Master: IAM Role
+  # TODO Restrict access to only what's really needed
   MasterInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
@@ -255,8 +256,8 @@ Resources:
                 - "ec2.amazonaws.com"
             Action: 
               - "sts:AssumeRole"
-      # See https://docs.google.com/document/d/17d4qinC_HnIwrK0GHnRlD1FKkTNdN__VO4TH9-EzbIY/edit
       Policies:
+        # See https://docs.google.com/document/d/17d4qinC_HnIwrK0GHnRlD1FKkTNdN__VO4TH9-EzbIY/edit
         - PolicyName: !Sub ${ClusterName}-master
           PolicyDocument: 
             Version: "2012-10-17"
@@ -417,6 +418,7 @@ Resources:
         - !Ref MasterAPITargetGroup
 
   # Master: Security Group
+  # See https://coreos.com/kubernetes/docs/latest/kubernetes-networking.html
   MasterSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties: 
@@ -427,22 +429,78 @@ Resources:
         - Key: Name
           Value: !Sub ${ClusterName}-master
       SecurityGroupIngress:
+        # Kubernetes API server
         - CidrIp: "0.0.0.0/0"
           IpProtocol: tcp
           FromPort: 6443
           ToPort: 6443
+        # SSH Access
         - CidrIp: "0.0.0.0/0"
           IpProtocol: tcp
           FromPort: 22
           ToPort: 22
-  MasterSecurityGroupIngress:
+  # Master: Security Group (EFS)
+  MasterSecurityGroupEtcdMasterIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !Ref MasterSecurityGroup
       SourceSecurityGroupId: !Ref MasterSecurityGroup
-      IpProtocol: "-1"
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+  # Master: Security Group (Etcd)
+  MasterSecurityGroupEtcdMasterIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref MasterSecurityGroup
+      SourceSecurityGroupId: !Ref MasterSecurityGroup
+      IpProtocol: tcp
+      FromPort: 2379
+      ToPort: 2380
+  MasterSecurityGroupEtcdNodeIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref MasterSecurityGroup
+      SourceSecurityGroupId: !Ref NodeSecurityGroup
+      IpProtocol: tcp
+      FromPort: 2379
+      ToPort: 2380
+  # Master: Security Group (Flannel overlay network)
+  MasterSecurityGroupFlannelUDPMasterIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref MasterSecurityGroup
+      SourceSecurityGroupId: !Ref MasterSecurityGroup
+      IpProtocol: udp
+      FromPort: 8285
+      ToPort: 8285
+  MasterSecurityGroupFlannelVXLanMasterIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref MasterSecurityGroup
+      SourceSecurityGroupId: !Ref MasterSecurityGroup
+      IpProtocol: udp
+      FromPort: 8472
+      ToPort: 8472
+  MasterSecurityGroupFlannelUDPNodeIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref MasterSecurityGroup
+      SourceSecurityGroupId: !Ref NodeSecurityGroup
+      IpProtocol: udp
+      FromPort: 8285
+      ToPort: 8285
+  MasterSecurityGroupFlannelVXLanNodeIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref MasterSecurityGroup
+      SourceSecurityGroupId: !Ref NodeSecurityGroup
+      IpProtocol: udp
+      FromPort: 8472
+      ToPort: 8472
 
   # Node: IAM Role
+  # TODO Restrict access to only what's really needed
   NodeInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
@@ -463,8 +521,8 @@ Resources:
                 - "ec2.amazonaws.com"
             Action: 
               - "sts:AssumeRole"
-      # See https://docs.google.com/document/d/17d4qinC_HnIwrK0GHnRlD1FKkTNdN__VO4TH9-EzbIY/edit
       Policies:
+        # See https://docs.google.com/document/d/17d4qinC_HnIwrK0GHnRlD1FKkTNdN__VO4TH9-EzbIY/edit
         - PolicyName: !Sub ${ClusterName}-node
           PolicyDocument: 
             Version: "2012-10-17"
@@ -480,6 +538,7 @@ Resources:
                   - ecr:DescribeRepositories
                   - ecr:ListImages
                   - ecr:BatchGetImage
+
   # Node: Autoscaling Group
   NodeLaunchConfigurtion:
     Type: AWS::AutoScaling::LaunchConfiguration
@@ -540,6 +599,7 @@ Resources:
         - !Ref NodeHTTPSTargetGroup
 
   # Node: Security Group
+  # See https://coreos.com/kubernetes/docs/latest/kubernetes-networking.html
   NodeSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties: 
