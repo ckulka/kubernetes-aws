@@ -41,12 +41,16 @@ Metadata:
         default: Cluster Name
       MasterInstanceType: 
         default: Instance Type (Master)
+      MasterDiskSpace:
+        default: Disk Size (Master)
       NodeInstanceType: 
         default: Instance Type (Node)
+      WorkerDiskSpace:
+        default: Disk Size (Worker)
       ImageId:
         default: Amazon Machine Image
       VpcId:
-        default: VPC ID
+        default: VPC
       KubernetesVersion:
         default: Kubernetes Version
       DockerVersion:
@@ -130,6 +134,18 @@ Parameters:
     Type: AWS::EC2::Image::Id
     Default: ami-46c1b650
     Description: AMI to use for the EC2 instances
+  MasterDiskSpace:
+    Type: Number
+    Default: 10
+    Description: Disk size in GB for Docker images and volumes on the master.
+    MinValue: 1
+    MaxValue: 16000
+  WorkerDiskSpace:
+    Type: Number
+    Default: 10
+    Description: Disk size in GB for Docker images and volumes on the worker nodes.
+    MinValue: 1
+    MaxValue: 16000
 
 Conditions:
   HasKeyName:
@@ -287,13 +303,46 @@ Resources:
     Metadata:
       AWS::CloudFormation::Init: 
         configSets:
-          efs:
-            - efsConfig
-          default:
+          master:
+            - mountEFS
+            - mountEBS
             - installDocker
             - installKubernetes
-          initCluster:
-            - initClusterConfig
+            - initCluster
+          worker:
+            - mountEBS
+            - installDocker
+            - installKubernetes
+            - joinCluster
+        mountEFS:
+          # See http://docs.aws.amazon.com/efs/latest/ug/wt1-test.html
+          packages:
+            yum:
+              nfs-utils: []
+          commands:
+            10mountEfs:
+              command: bash /tmp/mount-efs.sh
+              test: "! mountpoint /mnt/efs"
+          files:
+            /tmp/mount-efs.sh:
+              content: !Sub |
+                #!/bin/bash
+                mkdir -p /mnt/efs
+                mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ${MasterFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /mnt/efs
+                mkdir -p /mnt/efs/kubernetes /mnt/efs/etcd
+                ln -s /mnt/efs/etcd /var/lib/etcd
+                ln -s /mnt/efs/kubernetes /etc/kubernetes
+        mountEBS:
+          # See http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-using-volumes.html
+          commands:
+            10format:
+              command: mkfs -t ext4 /dev/xvdb
+              test: '[ "$(file -s /dev/xvdb)" = "/dev/xvdb: data" ]'
+            20createMountDirectory:
+              command: mkdir -p /var/lib/docker
+            30mount:
+              command: mount /dev/xvdb /var/lib/docker
+              test: "! mountpoint /var/lib/docker"
         installDocker:
           # See https://docs.docker.com/engine/installation/linux/docker-ce/centos/#install-docker-ce
           packages:
@@ -332,25 +381,7 @@ Resources:
               content: |
                 [Service]
                 Environment="KUBELET_EXTRA_ARGS=--cloud-provider=aws"
-        efsConfig:
-          # See http://docs.aws.amazon.com/efs/latest/ug/wt1-test.html
-          packages:
-            yum:
-              nfs-utils: []
-          commands:
-            10mountEfs:
-              command: bash /tmp/mount-efs.sh
-              test: "! mountpoint /mnt/efs"
-          files:
-            /tmp/mount-efs.sh:
-              content: !Sub |
-                #!/bin/bash
-                mkdir -p /mnt/efs
-                mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ${MasterFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /mnt/efs
-                mkdir -p /mnt/efs/kubernetes /mnt/efs/etcd
-                ln -s /mnt/efs/etcd /var/lib/etcd
-                ln -s /mnt/efs/kubernetes /etc/kubernetes
-        initClusterConfig:
+        initCluster:
           commands:
             initialiseKubernetes:
               command: bash /tmp/kubernetes-init.sh
@@ -359,6 +390,8 @@ Resources:
             /tmp/kubernetes-init.sh:
               content: !Sub |
                 #!/bin/bash
+                kubeadm reset
+
                 # See https://kubernetes.io/docs/setup/independent/create-cluster-kubeadm/
                 kubeadm init                                                            \
                   --kubernetes-version v${KubernetesVersion}                            \
@@ -377,6 +410,11 @@ Resources:
                 # See https://docs.traefik.io/user-guide/kubernetes/
                 kubectl apply -f https://raw.githubusercontent.com/containous/traefik/v${TraefikVersion}/examples/k8s/traefik-rbac.yaml
                 kubectl apply -f https://raw.githubusercontent.com/containous/traefik/v${TraefikVersion}/examples/k8s/traefik-ds.yaml
+        joinCluster:
+          # See https://kubernetes.io/docs/admin/kubeadm/#kubeadm-join
+          commands:
+            10join:
+              command: !Sub kubeadm join --token ${KubernetesToken} --discovery-token-unsafe-skip-ca-verification ${LoadBalancer.DNSName}:6443
     Properties:
       SecurityGroups: 
         - !Ref MasterSecurityGroup
@@ -385,12 +423,11 @@ Resources:
       IamInstanceProfile: !Ref MasterInstanceProfile
       KeyName: !If [ HasKeyName, !Ref KeyName, !Ref "AWS::NoValue" ]
       BlockDeviceMappings:
-        - DeviceName: /dev/sda1
+        - DeviceName: /dev/sdb
           Ebs: 
             VolumeType: gp2
-            SnapshotId: snap-0c136bf135a86351f
             DeleteOnTermination: true
-            VolumeSize: 25
+            VolumeSize: !Ref MasterDiskSpace
       UserData:
         Fn::Base64: 
           !Sub |
@@ -400,9 +437,7 @@ Resources:
             easy_install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz
 
             # See http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-init.html
-            cfn-init --stack ${AWS::StackName} --resource MasterLaunchConfigurtion --configsets efs
-            cfn-init --stack ${AWS::StackName} --resource MasterLaunchConfigurtion --configsets default
-            cfn-init --stack ${AWS::StackName} --resource MasterLaunchConfigurtion --configsets initCluster
+            cfn-init --stack ${AWS::StackName} --resource MasterLaunchConfigurtion --configsets master
   MasterAutoscalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     DependsOn: MasterFileSystem
@@ -425,7 +460,7 @@ Resources:
         - !Ref MasterAPITargetGroup
 
   # Master: Security Group
-  # See https://coreos.com/kubernetes/docs/latest/kubernetes-networking.html
+  # See https://stackoverflow.com/questions/39293441/needed-ports-for-kubernetes-cluster
   MasterSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties: 
@@ -447,7 +482,7 @@ Resources:
           FromPort: 22
           ToPort: 22
   # Master: Security Group (EFS)
-  MasterSecurityGroupEtcdMasterIngress:
+  MasterSecurityGroupEfsMasterIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !Ref MasterSecurityGroup
@@ -546,16 +581,6 @@ Resources:
   # Node: Autoscaling Group
   NodeLaunchConfigurtion:
     Type: AWS::AutoScaling::LaunchConfiguration
-    Metadata:
-      AWS::CloudFormation::Init: 
-        configSets:
-          joinCluster:
-            - joinClusterConfig
-        joinClusterConfig:
-          # See https://kubernetes.io/docs/admin/kubeadm/#kubeadm-join
-          commands:
-            10join:
-              command: !Sub kubeadm join --token ${KubernetesToken} --discovery-token-unsafe-skip-ca-verification ${LoadBalancer.DNSName}:6443
     Properties:
       ImageId: !Ref ImageId
       InstanceType: !Ref NodeInstanceType
@@ -564,12 +589,11 @@ Resources:
       SecurityGroups: 
         - !Ref NodeSecurityGroup
       BlockDeviceMappings:
-        - DeviceName: /dev/sda1
+        - DeviceName: /dev/sdb
           Ebs: 
             VolumeType: gp2
-            SnapshotId: snap-0c136bf135a86351f
             DeleteOnTermination: true
-            VolumeSize: 25
+            VolumeSize: !Ref WorkerDiskSpace
       UserData:
         Fn::Base64: 
           !Sub |
@@ -579,8 +603,7 @@ Resources:
             easy_install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz
 
             # See http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-init.html
-            cfn-init --stack ${AWS::StackName} --resource MasterLaunchConfigurtion --configsets default
-            cfn-init --stack ${AWS::StackName} --resource NodeLaunchConfigurtion --configsets joinCluster
+            cfn-init --stack ${AWS::StackName} --resource MasterLaunchConfigurtion --configsets worker
   NodeAutoscalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
@@ -603,7 +626,7 @@ Resources:
         - !Ref NodeHTTPSTargetGroup
 
   # Node: Security Group
-  # See https://coreos.com/kubernetes/docs/latest/kubernetes-networking.html
+  # See https://stackoverflow.com/questions/39293441/needed-ports-for-kubernetes-cluster
   NodeSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties: 

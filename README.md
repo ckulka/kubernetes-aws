@@ -41,6 +41,5 @@ The following list only outlines the most important resources.
 
 ### TODO
 
+- Change advertise address from IP to ELB URL
 - Master failover testing
-- Find a better solution for the extended EBS volumes
-- Further restrict Node Security Group
