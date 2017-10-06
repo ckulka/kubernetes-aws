@@ -43,6 +43,4 @@ The following list only outlines the most important resources.
 
 - Master failover testing
 - Find a better solution for the extended EBS volumes
-- Further restrict Master IAM Instance Role
-- Further restrict Node IAM Instance Role
 - Further restrict Node Security Group

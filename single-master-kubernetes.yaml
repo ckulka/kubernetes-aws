@@ -75,7 +75,7 @@ Parameters:
       - internal
   ClusterName:
     Type: String
-    Default: awseu1k8s01
+    Default: euc1k8s01
     Description: Unique name of the cluster.
     AllowedPattern: ^[\w\.-]{1,25}$
   KubernetesToken:
@@ -257,7 +257,12 @@ Resources:
             Action: 
               - "sts:AssumeRole"
       Policies:
+        # The policies are limited to what's necessary to run Kubernetes with Flannel as an overlay network.
+        # Dynamically creating ELBs for Services is not in scope of this template.
+        # 
         # See https://docs.google.com/document/d/17d4qinC_HnIwrK0GHnRlD1FKkTNdN__VO4TH9-EzbIY/edit
+        # See https://gist.github.com/chrislovecnm/0e23d11903cc36b99ccf73a013d5ae56
+        # See https://docs.aws.amazon.com/AWSEC2/latest/APIReference/ec2-api-permissions.html
         - PolicyName: !Sub ${ClusterName}-master
           PolicyDocument: 
             Version: "2012-10-17"
@@ -265,16 +270,18 @@ Resources:
               - Effect: "Allow"
                 Resource: "*"
                 Action: 
-                  - ec2:*
-                  - ecr:GetAuthorizationToken
-                  - ecr:BatchCheckLayerAvailability
-                  - ecr:GetDownloadUrlForLayer
-                  - ecr:GetRepositoryPolicy
-                  - ecr:DescribeRepositories
-                  - ecr:ListImages
-                  - ecr:BatchGetImage
-                  - autoscaling:DescribeAutoScalingGroups
-                  - autoscaling:UpdateAutoScalingGroup
+                  - ec2:DescribeInstances
+                  - ec2:DescribeVolumes
+              - Effect: "Allow"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    ec2:ResourceTag/KubernetesCluster: !Ref AWS::StackName
+                Action:
+                  - ec2:AttachVolume
+                  - ec2:CreateVolume
+                  - ec2:DeleteVolume
+                  - ec2:DetachVolume
   MasterLaunchConfigurtion:
     Type: AWS::AutoScaling::LaunchConfiguration
     Metadata:
@@ -522,7 +529,12 @@ Resources:
             Action: 
               - "sts:AssumeRole"
       Policies:
+        # The policies are limited to what's necessary to run Kubernetes with Flannel as an overlay network.
+        # Dynamically creating ELBs for Services is not in scope of this template.
+        # 
         # See https://docs.google.com/document/d/17d4qinC_HnIwrK0GHnRlD1FKkTNdN__VO4TH9-EzbIY/edit
+        # See https://gist.github.com/chrislovecnm/0e23d11903cc36b99ccf73a013d5ae56
+        # See https://docs.aws.amazon.com/AWSEC2/latest/APIReference/ec2-api-permissions.html
         - PolicyName: !Sub ${ClusterName}-node
           PolicyDocument: 
             Version: "2012-10-17"
@@ -530,15 +542,7 @@ Resources:
               - Effect: "Allow"
                 Resource: "*"
                 Action: 
-                  - ec2:Describe*
-                  - ecr:GetAuthorizationToken
-                  - ecr:BatchCheckLayerAvailability
-                  - ecr:GetDownloadUrlForLayer
-                  - ecr:GetRepositoryPolicy
-                  - ecr:DescribeRepositories
-                  - ecr:ListImages
-                  - ecr:BatchGetImage
-
+                  - ec2:DescribeInstances
   # Node: Autoscaling Group
   NodeLaunchConfigurtion:
     Type: AWS::AutoScaling::LaunchConfiguration
