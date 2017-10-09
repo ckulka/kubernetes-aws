@@ -41,5 +41,5 @@ The following list only outlines the most important resources.
 
 ### TODO
 
-- Change advertise address from IP to ELB URL
+- Delete root volume on instance termination
 - Master failover testing

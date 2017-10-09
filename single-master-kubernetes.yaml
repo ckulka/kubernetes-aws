@@ -155,6 +155,9 @@ Resources:
   # Load Balancer
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn:
+      - Subnet1EIP
+      - Subnet2EIP
     Properties:
       Name: !Ref ClusterName
       Type: network
@@ -251,7 +254,6 @@ Resources:
         - !Ref MasterSecurityGroup
 
   # Master: IAM Role
-  # TODO Restrict access to only what's really needed
   MasterInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
@@ -288,6 +290,8 @@ Resources:
                 Action: 
                   - ec2:DescribeInstances
                   - ec2:DescribeVolumes
+                  - ec2:AssociateAddress
+                  - ec2:DisassociateAddress
               - Effect: "Allow"
                 Resource: "*"
                 Condition:
@@ -300,49 +304,57 @@ Resources:
                   - ec2:DetachVolume
   MasterLaunchConfigurtion:
     Type: AWS::AutoScaling::LaunchConfiguration
+    DependsOn: MasterEIP
     Metadata:
       AWS::CloudFormation::Init: 
         configSets:
           master:
+            - associateEip
             - mountEFS
             - mountEBS
             - installDocker
             - installKubernetes
-            - initCluster
+            - initialiseKubernetes
           worker:
             - mountEBS
             - installDocker
             - installKubernetes
             - joinCluster
+        associateEip:
+          commands:
+            10downloadPipScript:
+              command: curl -o /tmp/get-pip.py https://bootstrap.pypa.io/get-pip.py
+            20installPip:
+              command: python /tmp/get-pip.py
+            30installAwsCli:
+              command: pip install awscli --upgrade
+            40associateEip:
+              command: !Sub aws ec2 associate-address --region ${AWS::Region} --allocation-id ${MasterEIP.AllocationId} --instance-id $(curl http://169.254.169.254/latest/meta-data/instance-id)
         mountEFS:
           # See http://docs.aws.amazon.com/efs/latest/ug/wt1-test.html
           packages:
             yum:
               nfs-utils: []
           commands:
-            10mountEfs:
-              command: bash /tmp/mount-efs.sh
-              test: "! mountpoint /mnt/efs"
-          files:
-            /tmp/mount-efs.sh:
-              content: !Sub |
-                #!/bin/bash
-                mkdir -p /mnt/efs
-                mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ${MasterFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /mnt/efs
-                mkdir -p /mnt/efs/kubernetes /mnt/efs/etcd
-                ln -s /mnt/efs/etcd /var/lib/etcd
-                ln -s /mnt/efs/kubernetes /etc/kubernetes
+            10createMountDirectory:
+              command: mkdir -p /mnt/efs
+            20mount:
+              command: !Sub mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ${MasterFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /mnt/efs
+            30createPersistentDirectories:
+              command: mkdir -p /mnt/efs/kubernetes /mnt/efs/etcd
+            40linkEtcdDirectory:
+              command: ln -s /mnt/efs/etcd /var/lib/etcd
+            50linkKubernetesDirectory:
+              command: ln -s /mnt/efs/kubernetes /etc/kubernetes
         mountEBS:
           # See http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-using-volumes.html
           commands:
             10format:
               command: mkfs -t ext4 /dev/xvdb
-              test: '[ "$(file -s /dev/xvdb)" = "/dev/xvdb: data" ]'
             20createMountDirectory:
               command: mkdir -p /var/lib/docker
             30mount:
               command: mount /dev/xvdb /var/lib/docker
-              test: "! mountpoint /var/lib/docker"
         installDocker:
           # See https://docs.docker.com/engine/installation/linux/docker-ce/centos/#install-docker-ce
           packages:
@@ -365,7 +377,9 @@ Resources:
             20installKubernetes:
               command: !Sub yum install -y kubelet-${KubernetesVersion} kubeadm-${KubernetesVersion} kubectl-${KubernetesVersion}
             30startKubernetes:
-              command: systemctl daemon-reload && systemctl enable kubelet && systemctl start kubelet
+              command: systemctl daemon-reload && systemctl enable kubelet
+            40addMasterToEtcHosts:
+              command: !Sub echo ${MasterEIP} master >> /etc/hosts
           files:
             /etc/yum.repos.d/kubernetes.repo:
               content: |
@@ -377,31 +391,35 @@ Resources:
                 repo_gpgcheck=1
                 gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg
                         https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
-            /etc/systemd/system/kubelet.service.d/20-cloud-provider.conf:
-              content: |
-                [Service]
-                Environment="KUBELET_EXTRA_ARGS=--cloud-provider=aws"
-        initCluster:
+            # /etc/systemd/system/kubelet.service.d/20-cloud-provider.conf:
+            #   content: |
+            #     [Service]
+            #     Environment="KUBELET_EXTRA_ARGS=--cloud-provider=aws"
+        initialiseKubernetes:
           commands:
-            initialiseKubernetes:
-              command: bash /tmp/kubernetes-init.sh
+            10setHostname:
+              command: hostnamectl set-hostname --static master
+            20initialiseKubernetes:
+              command: bash /tmp/cfn-initialise-kubernetes.sh
               test: "! test -e /etc/kubernetes/admin.conf"
+            30startKubernetes:
+              command: systemctl start kubelet
+              test: "! systemctl status kubelet"
           files:
-            /tmp/kubernetes-init.sh:
+            /tmp/cfn-initialise-kubernetes.sh:
               content: !Sub |
                 #!/bin/bash
-                kubeadm reset
-
                 # See https://kubernetes.io/docs/setup/independent/create-cluster-kubeadm/
                 kubeadm init                                                            \
                   --kubernetes-version v${KubernetesVersion}                            \
                   --pod-network-cidr ${PodNetworkCIDR}                                  \
-                  --node-name $(curl http://169.254.169.254/latest/meta-data/hostname)  \
                   --apiserver-advertise-address ${LoadBalancer.DNSName}                 \
                   --apiserver-cert-extra-sans ${LoadBalancer.DNSName}                   \
                   --token ${KubernetesToken}                                            \
                   --token-ttl 0
                 
+                # Needed until https://github.com/kubernetes/kubeadm/issues/411 is fixed
+                sed -i 's#https://.*:6443$#https://${LoadBalancer.DNSName}:6443#' /etc/kubernetes/admin.conf
                 export KUBECONFIG=/etc/kubernetes/admin.conf
 
                 # See https://github.com/coreos/flannel
@@ -458,6 +476,10 @@ Resources:
           PropagateAtLaunch: true
       TargetGroupARNs:
         - !Ref MasterAPITargetGroup
+  MasterEIP:
+    Type: 'AWS::EC2::EIP'
+    Properties:
+      Domain: vpc
 
   # Master: Security Group
   # See https://stackoverflow.com/questions/39293441/needed-ports-for-kubernetes-cluster
