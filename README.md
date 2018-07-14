@@ -2,6 +2,8 @@
 
 This repository contains CloudFormation templates for Kubernetes clusters on AWS.
 
+**Deprecated:** since AWS EKS (<https://aws.amazon.com/eks/>) has now been released, consider this template to be deprecated.
+
 ## Single Master Cluster
 
 The `single-master-kubernetes.yaml` CloudFormation template creates a Kubernetes cluster with a single master node. The peristent files of the master node are stored on EFS.
